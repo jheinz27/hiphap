@@ -1,5 +1,7 @@
 use std::cmp::max;
 use std::ffi::CString;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::iter::Peekable;
 use std::path::Path;
 
@@ -10,7 +12,77 @@ use rust_htslib::{
     htslib,
 };
 
+use rand::{thread_rng, Rng};
+
 use crate::cli::Cli;
+
+
+// estimate  the minimap2 `-A` (Match score) parameter from an aligned BAM.
+// Samples ~1 in 10,000 mapped reads until 10 reads are sampledd
+// and returns the ceiling of the maximum ms / alignment_length  value.
+//claude implemented (checked )
+pub fn estimate_minimap2_a(bam_path: &str, reference: Option<&str>) -> Result<i32, Box<dyn std::error::Error>> {
+    let mut reader = bam::Reader::from_path(bam_path)
+        .map_err(|e| format!("Failed to open '{}' for -A estimation: {}. Set -A/--match_sc explicitly.", bam_path, e))?;
+
+    //use min required number of threads 
+    reader.set_threads(4)
+        .map_err(|e| format!("Failed to set threads for -A estimation on '{}': {}", bam_path, e))?;
+
+    //if reference provided (CRAM), apply it
+    if let Some(refpath) = reference {
+        reader.set_reference(refpath)
+            .map_err(|e| format!("Failed to set reference for -A estimation on '{}': {}. Set -A/--match_sc explicitly.", bam_path, e))?;
+    }
+
+    let mut record = Record::new();
+    let mut rng = thread_rng();
+    let mut max_ratio: f64 = 0.0;
+    let mut sampled: u32 = 0;
+
+    //zero-allocation iteration: reuse single Record buffer
+    while let Some(result) = reader.read(&mut record) {
+        result.map_err(|e| format!("Error reading '{}' during -A estimation: {}. Set -A/--match_sc explicitly.", bam_path, e))?;
+
+        //skip unmapped/secondary/supplementary alignments
+        if record.is_unmapped() || record.is_secondary() || record.is_supplementary() {
+            continue;
+        }
+
+        //~1 in 10,000 unbiased random sampling
+        if !rng.gen_bool(0.0001) { continue; }
+
+        //alignment length from CIGAR 
+        let aln_len = get_alignment_len(&record);
+        if aln_len == 0 { continue; }
+
+        //extract ms:i tag (integer width varies across files)
+        let ms_score: i64 = match record.aux(b"ms") {
+            Ok(Aux::I8(v))  => v as i64,
+            Ok(Aux::I16(v)) => v as i64,
+            Ok(Aux::I32(v)) => v as i64,
+            Ok(Aux::U8(v))  => v as i64,
+            Ok(Aux::U16(v)) => v as i64,
+            Ok(Aux::U32(v)) => v as i64,
+            _ => continue,
+        };
+
+        let ratio = ms_score as f64 / aln_len as f64;
+        if ratio > max_ratio { max_ratio = ratio; }
+
+        sampled += 1;
+        if sampled >= 10 { break; }
+    }
+
+    if sampled == 0 || max_ratio <= 0.0 {
+        return Err(format!(
+            "Could not estimate minimap2 -A from '{}': no informative sampled reads with valid ms:i tags found. \
+             Set -A/--match_sc explicitly.", bam_path
+        ).into());
+    }
+
+    Ok(max_ratio.ceil() as i32)
+}
 
 
 /// Helper function to peek at the file format using c path
@@ -119,6 +191,38 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Warning: --ref2 is ignored for non-CRAM input");
     }
 
+    //resolve match score: user override takes precedence, else auto-estimate from both BAMs
+    let resolved_match_sc: f32 = match args.match_sc {
+        Some(v) => v,
+        None => {
+            let a1 = estimate_minimap2_a(&args.asm1, args.ref1.as_deref())?;
+            let a2 = estimate_minimap2_a(&args.asm2, args.ref2.as_deref())?;
+            let est = a1.max(a2);
+            eprintln!("Auto-estimated minimap2 -A (--match-score) from files: asm1={}, asm2={}, using={}", a1, a2, est);
+            est as f32
+        }
+    };
+
+    //open side writer for reads whose winning cluster spans multiple chromosomes (unless disabled)
+    //per-run filename mirrors the BAM/SAM output naming so concurrent runs in the same cwd
+    //do not overwrite each other's span file
+    let span_path = format!("diplinator_{}_{}_span_chrom.txt", args.s1, args.s2);
+    let mut span_writer: Option<BufWriter<File>> = if args.no_span_chrom {
+        None
+    } else {
+        Some(BufWriter::new(File::create(&span_path)
+            .map_err(|e| format!("Failed to create '{}': {}", span_path, e))?))
+    };
+
+    //cache owned header views for tid -> contig name resolution (each reader's records()
+    //call below mutably borrows the reader, so we can't reach back to the header inside the loop)
+    let asm1_hdr = asm1_reader.header().to_owned();
+    let asm2_hdr = asm2_reader.header().to_owned();
+    //pre-compute target name slices once; otherwise emit_span would re-walk the header text
+    //for every chrom-spanning read
+    let asm1_names = asm1_hdr.target_names();
+    let asm2_names = asm2_hdr.target_names();
+
     //set threads
     //if user specifies less than 4, set to 4 (1 thread for each reader and each writer is needed)
     let avail_threads = max(4, args.threads);
@@ -178,37 +282,69 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         //get cluster with the higher alignment score, returns the Winner enum and HAPQ
-        let (winner, hapq) = compare_clusters(&mut cluster_asm1, &mut cluster_asm2, &args)?;
+        let (winner, hapq) = compare_clusters(&mut cluster_asm1, &mut cluster_asm2, &args, resolved_match_sc)?;
 
         //logic for which file to write read to given score comparison output
         match winner {
             //asm1 clear winner, write to out_asm1
             crate::Winner::Asm1 => {
                 count_asm1 += 1; // increment read counter
+                let mut seen_tids: Vec<i32> = Vec::with_capacity(4);
                 for rec in cluster_asm1.iter_mut() {
+                    if span_writer.is_some() && !rec.is_secondary() && !rec.is_unmapped() {
+                        let t = rec.tid();
+                        if !seen_tids.contains(&t) { seen_tids.push(t); }
+                    }
                     if let Some(hq) = hapq { rec.push_aux(b"hq", Aux::U8(hq))?; }
                     out_asm1.write(rec)?;
+                }
+                if seen_tids.len() > 1 {
+                    emit_span(&mut span_writer, cluster_asm1[0].qname(), &seen_tids, &asm1_names, "asm1")?;
                 }
             }
             //asm2 clear winner, write to out_asm2
             crate::Winner::Asm2 => {
                 count_asm2 += 1; // increment read counter
+                let mut seen_tids: Vec<i32> = Vec::with_capacity(4);
                 for rec in cluster_asm2.iter_mut() {
+                    if span_writer.is_some() && !rec.is_secondary() && !rec.is_unmapped() {
+                        let t = rec.tid();
+                        if !seen_tids.contains(&t) { seen_tids.push(t); }
+                    }
                     if let Some(hq) = hapq { rec.push_aux(b"hq", Aux::U8(hq))?; }
                     out_asm2.write(rec)?;
+                }
+                if seen_tids.len() > 1 {
+                    emit_span(&mut span_writer, cluster_asm2[0].qname(), &seen_tids, &asm2_names, "asm2")?;
                 }
             }
             crate::Winner::Both => {
                 count_equal += 1; // increment read counter
                 //if user specifices --both, write equal scoring reads to output files
                 if args.both {
+                    let mut seen_tids1: Vec<i32> = Vec::with_capacity(4);
                     for rec in cluster_asm1.iter_mut() {
+                        if span_writer.is_some() && !rec.is_secondary() && !rec.is_unmapped() {
+                            let t = rec.tid();
+                            if !seen_tids1.contains(&t) { seen_tids1.push(t); }
+                        }
                         if let Some(hq) = hapq { rec.push_aux(b"hq", Aux::U8(hq))?; }
                         out_asm1.write(rec)?;
                     }
+                    if seen_tids1.len() > 1 {
+                        emit_span(&mut span_writer, cluster_asm1[0].qname(), &seen_tids1, &asm1_names, "asm1")?;
+                    }
+                    let mut seen_tids2: Vec<i32> = Vec::with_capacity(4);
                     for rec in cluster_asm2.iter_mut() {
+                        if span_writer.is_some() && !rec.is_secondary() && !rec.is_unmapped() {
+                            let t = rec.tid();
+                            if !seen_tids2.contains(&t) { seen_tids2.push(t); }
+                        }
                         if let Some(hq) = hapq { rec.push_aux(b"hq", Aux::U8(hq))?; }
                         out_asm2.write(rec)?;
+                    }
+                    if seen_tids2.len() > 1 {
+                        emit_span(&mut span_writer, cluster_asm2[0].qname(), &seen_tids2, &asm2_names, "asm2")?;
                     }
                 //default behavior is randomly assign equal scoring read to one file
                 } else {
@@ -216,15 +352,31 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                     //ensures that assignments will be reproducible
                     match crate::choose_random(cluster_asm1[0].qname()) {
                         crate::Winner::Asm1 => {
+                            let mut seen_tids: Vec<i32> = Vec::with_capacity(4);
                             for rec in cluster_asm1.iter_mut() {
+                                if span_writer.is_some() && !rec.is_secondary() && !rec.is_unmapped() {
+                                    let t = rec.tid();
+                                    if !seen_tids.contains(&t) { seen_tids.push(t); }
+                                }
                                 if let Some(hq) = hapq { rec.push_aux(b"hq", Aux::U8(hq))?; }
                                 out_asm1.write(rec)?;
                             }
+                            if seen_tids.len() > 1 {
+                                emit_span(&mut span_writer, cluster_asm1[0].qname(), &seen_tids, &asm1_names, "asm1")?;
+                            }
                         }
                         _ => {
+                            let mut seen_tids: Vec<i32> = Vec::with_capacity(4);
                             for rec in cluster_asm2.iter_mut() {
+                                if span_writer.is_some() && !rec.is_secondary() && !rec.is_unmapped() {
+                                    let t = rec.tid();
+                                    if !seen_tids.contains(&t) { seen_tids.push(t); }
+                                }
                                 if let Some(hq) = hapq { rec.push_aux(b"hq", Aux::U8(hq))?; }
                                 out_asm2.write(rec)?;
+                            }
+                            if seen_tids.len() > 1 {
+                                emit_span(&mut span_writer, cluster_asm2[0].qname(), &seen_tids, &asm2_names, "asm2")?;
                             }
                         }
                     }
@@ -251,6 +403,12 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
 
     }
+    //explicitly flush the span writer so disk-full / I/O errors surface as Err instead of
+    //being silently swallowed by BufWriter::drop (BAM writers are flushed by htslib at close)
+    if let Some(w) = span_writer.as_mut() {
+        w.flush().map_err(|e| format!("Failed to flush '{}': {}", span_path, e))?;
+    }
+
     //print summarry statistics to terminal
     let total = count_asm1 + count_asm2 + count_equal + count_unmapped;
     eprintln!("Reads aligned better to {}: {} ({:.1}%)", args.s1, count_asm1, count_asm1 as f64 / total as f64 * 100.0);
@@ -386,7 +544,7 @@ fn get_weighted_score(cur_clust : &mut Vec<Record>, tag: &[u8]) -> Result<(f32, 
 }
 
 //choose which alignment block to keep
-fn compare_clusters<'a>(clust1:&'a mut Vec<Record>, clust2:&'a mut Vec<Record>, args:&Cli) ->  Result<(crate::Winner, Option<u8>), Box<dyn std::error::Error>> {
+fn compare_clusters<'a>(clust1:&'a mut Vec<Record>, clust2:&'a mut Vec<Record>, args:&Cli, match_sc: f32) ->  Result<(crate::Winner, Option<u8>), Box<dyn std::error::Error>> {
 
     //if either cluster is empty there is a file sync issue as every cluster should have at least one record
     if clust1.is_empty() || clust2.is_empty() {
@@ -417,10 +575,10 @@ fn compare_clusters<'a>(clust1:&'a mut Vec<Record>, clust2:&'a mut Vec<Record>, 
     //return respective winner depending on which AS is higher,
     //both is a special case that can be determined by user input
     if score1 > score2 {
-        let hapq = if args.no_hapq { None } else { Some(crate::compute_hapq(score1, score2, n_splits1, args.match_sc)) };
+        let hapq = if args.no_hapq { None } else { Some(crate::compute_hapq(score1, score2, n_splits1, match_sc)) };
         Ok((crate::Winner::Asm1, hapq))
     } else if score1 < score2 {
-        let hapq = if args.no_hapq { None } else { Some(crate::compute_hapq(score2, score1, n_splits2, args.match_sc)) };
+        let hapq = if args.no_hapq { None } else { Some(crate::compute_hapq(score2, score1, n_splits2, match_sc)) };
         Ok((crate::Winner::Asm2, hapq))
     } else {
         let hapq = if args.no_hapq { None } else { Some(0u8) };
@@ -490,3 +648,28 @@ fn get_query_start(rec: &Record) -> u32 {
 
 }
 
+
+//write one line to the chrom-spanning side file: qname \t chrom1,chrom2,... \t asm_label
+//chrom names are resolved via the caller-provided target_names slice (computed once,
+//not once per spanning event). unmapped tids (-1) and out-of-bounds tids are dropped safely.
+//chrom order in the output is insertion order = order of appearance in the cluster
+//(i.e. primary first, then supplementaries), which is more informative than alphabetical
+fn emit_span(
+    w: &mut Option<BufWriter<File>>,
+    qname: &[u8],
+    tids: &[i32],
+    names: &[&[u8]],
+    label: &str,
+) -> std::io::Result<()> {
+    if let Some(file) = w {
+        let q = std::str::from_utf8(qname).unwrap_or("?");
+        let chroms: Vec<&str> = tids.iter()
+            .filter(|&&t| t >= 0)
+            .map(|&t| names.get(t as usize)
+                .and_then(|n| std::str::from_utf8(n).ok())
+                .unwrap_or("?"))
+            .collect();
+        writeln!(file, "{}\t{}\t{}", q, chroms.join(","), label)?;
+    }
+    Ok(())
+}

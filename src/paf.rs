@@ -3,10 +3,139 @@ use std::{
     io::{self, BufRead, BufReader, Write, BufWriter},
     iter::Peekable,
 };
+
+use rand::{thread_rng, Rng};
+
 use crate::cli::Cli;
 
 
+// estimate  the minimap2 `-A` (Match score) parameter from PAF .
+// Samples ~1 in 10,000 mapped reads until 10 reads are sampledd
+// and returns the ceiling of the maximum ms / alignment_length  value.
+//claude implemented (checked) 
+pub fn estimate_minimap2_a_paf(paf_path: &str) -> Result<i32, Box<dyn std::error::Error>> {
+    let file = File::open(paf_path)
+        .map_err(|e| format!("Failed to open '{}' for -A estimation: {}. Set -A/--match_sc explicitly.", paf_path, e))?;
+    let mut reader = BufReader::new(file);
+
+    let mut line = String::new();
+    let mut rng = thread_rng();
+    let mut max_ratio: f64 = 0.0;
+    let mut sampled: u32 = 0;
+
+    //reuse a single String buffer (analog of zero-alloc Record reuse in the BAM path)
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line)
+            .map_err(|e| format!("Error reading '{}' during -A estimation: {}. Set -A/--match_sc explicitly.", paf_path, e))?;
+        if n == 0 { break; } //EOF
+
+        let trimmed = line.trim_end_matches(|c| c == '\n' || c == '\r');
+        if trimmed.is_empty() { continue; }
+
+        //skip unmapped: target name (col 6, index 5) is "*"
+        let mut fields = trimmed.split('\t');
+        let _qname = match fields.next() { Some(v) => v, None => continue };
+        let _qlen  = match fields.next() { Some(v) => v, None => continue };
+        let qstart_s = match fields.next() { Some(v) => v, None => continue };
+        let qend_s   = match fields.next() { Some(v) => v, None => continue };
+        let _strand  = match fields.next() { Some(v) => v, None => continue };
+        let tname    = match fields.next() { Some(v) => v, None => continue };
+        if tname == "*" { continue; }
+
+        //~1 in 10,000 sampling (kept after unmapped filter for parity with BAM path)
+        if !rng.gen_bool(0.0001) { continue; }
+
+        //alignment length: qend - qstart (matches get_alignment_len semantics from sam.rs)
+        let qstart: u32 = match qstart_s.parse() { Ok(v) => v, Err(_) => continue };
+        let qend: u32   = match qend_s.parse()   { Ok(v) => v, Err(_) => continue };
+        if qend <= qstart { continue; }
+        let aln_len = qend - qstart;
+
+        //skip 6 more fields (tlen, tstart, tend, matches, alnlen, mapq) to reach tags,
+        //then walk the optional tags once looking for both tp:A:S (secondary) and ms:i:<n>.
+        //we skip secondaries here to mirror the BAM estimator, which skips is_secondary.
+        let mut is_secondary = false;
+        let mut ms_score: i64 = -1;
+        for f in fields.skip(6) {
+            if f == "tp:A:S" {
+                is_secondary = true;
+            } else if let Some(v) = f.strip_prefix("ms:i:") {
+                ms_score = v.parse::<i64>().unwrap_or(-1);
+            }
+        }
+        if is_secondary || ms_score < 0 { continue; }
+
+        let ratio = ms_score as f64 / aln_len as f64;
+        if ratio > max_ratio { max_ratio = ratio; }
+
+        sampled += 1;
+        if sampled >= 10 { break; }
+    }
+
+    if sampled == 0 || max_ratio <= 0.0 {
+        return Err(format!(
+            "Could not estimate minimap2 -A from '{}': no informative sampled lines with valid ms:i tags found. \
+             Ensure the PAF was produced with `minimap2 -cx ...`, or set -A/--match_sc explicitly.", paf_path
+        ).into());
+    }
+
+    Ok(max_ratio.ceil() as i32)
+}
+
+
+//write one line to the chrom-spanning side file: qname \t chrom1,chrom2,... \t asm_label
+//(PAF variant: contig names are already strings, no header lookup needed)
+//chrom order is insertion order = order of appearance in the cluster (primary first,
+//then supplementaries), which is more informative than alphabetical
+fn emit_span_paf(
+    w: &mut Option<BufWriter<File>>,
+    qname: &str,
+    chroms: &[String],
+    label: &str,
+) -> std::io::Result<()> {
+    if let Some(file) = w {
+        writeln!(file, "{}\t{}\t{}", qname, chroms.join(","), label)?;
+    }
+    Ok(())
+}
+
+
+//single-pass parse of a PAF line for span tracking: returns the target name (col 5)
+//if the line is a mapped, non-secondary primary alignment; None otherwise.
+//walks each tab-separated field exactly once and stops as soon as both signals are known.
+fn paf_span_chrom(rec: &str) -> Option<&str> {
+    let mut tname: Option<&str> = None;
+    for (i, f) in rec.split('\t').enumerate() {
+        match i {
+            5 => {
+                if f == "*" { return None; } // unmapped
+                tname = Some(f);
+            }
+            i if i >= 12 => {
+                // optional tags start at col 12; bail as soon as we see a secondary marker
+                if f == "tp:A:S" { return None; }
+            }
+            _ => {} // mandatory cols 0..=4, 6..=11 don't affect span tracking
+        }
+    }
+    tname
+}
+
+
 pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+
+    //resolve match score: user override takes precedence, else auto-estimate from both PAFs
+    let resolved_match_sc: f32 = match args.match_sc {
+        Some(v) => v,
+        None => {
+            let a1 = estimate_minimap2_a_paf(&args.asm1)?;
+            let a2 = estimate_minimap2_a_paf(&args.asm2)?;
+            let est = a1.max(a2);
+            eprintln!("Auto-estimated minimap2 -A (--match-score) from PAFs: asm1={}, asm2={}, using={}", a1, a2, est);
+            est as f32
+        }
+    };
 
     // read in both files
     let file1 = File::open(&args.asm1)
@@ -25,6 +154,17 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("Failed to create output file '{}': {}", asm1_out_path, e))?);
     let mut out_asm2 = BufWriter::new(File::create(&asm2_out_path)
         .map_err(|e| format!("Failed to create output file '{}': {}", asm2_out_path, e))?);
+
+    //open side writer for reads whose winning cluster spans multiple chromosomes (unless disabled)
+    //per-run filename mirrors the PAF output naming so concurrent runs in the same cwd
+    //do not overwrite each other's span file
+    let span_path = format!("diplinator_{}_{}_span_chrom.txt", args.s1, args.s2);
+    let mut span_writer: Option<BufWriter<File>> = if args.no_span_chrom {
+        None
+    } else {
+        Some(BufWriter::new(File::create(&span_path)
+            .map_err(|e| format!("Failed to create '{}': {}", span_path, e))?))
+    };
 
     //vectors that store all alignments of one read (cluster of alignments)
     //initialize capacity to 10 to account for supplemental and secondary alignments
@@ -65,7 +205,7 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         //get cluster with the higher alignment score, returns the Winner enum and HAPQ
-        let (winner, hapq) = compare_clusters(&mut cluster_asm1, &mut cluster_asm2, args)?;
+        let (winner, hapq) = compare_clusters(&mut cluster_asm1, &mut cluster_asm2, args, resolved_match_sc)?;
 
         //logic for which file to write read to given score comparison output
         //helper: format hq tag suffix if hapq is present
@@ -78,41 +218,112 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             //asm1 clear winner, write to out_asm1
             crate::Winner::Asm1 => {
                 count_asm1 += 1; // increment read counter
+                let mut seen_chroms: Vec<String> = Vec::with_capacity(4);
                 for rec in cluster_asm1.iter_mut() {
+                    if span_writer.is_some() {
+                        if let Some(tname) = paf_span_chrom(rec) {
+                            if !seen_chroms.iter().any(|s| s == tname) {
+                                seen_chroms.push(tname.to_string());
+                            }
+                        }
+                    }
                     writeln!(out_asm1, "{}{}", rec, hq_suffix)?;
+                }
+                if seen_chroms.len() > 1 {
+                    let qname = cluster_asm1[0].split('\t').next().unwrap_or("");
+                    emit_span_paf(&mut span_writer, qname, &seen_chroms, "asm1")?;
                 }
             }
             //asm2 clear winner, write to out_asm2
             crate::Winner::Asm2 => {
                 count_asm2 += 1; // increment read counter
+                let mut seen_chroms: Vec<String> = Vec::with_capacity(4);
                 for rec in cluster_asm2.iter_mut() {
+                    if span_writer.is_some() {
+                        if let Some(tname) = paf_span_chrom(rec) {
+                            if !seen_chroms.iter().any(|s| s == tname) {
+                                seen_chroms.push(tname.to_string());
+                            }
+                        }
+                    }
                     writeln!(out_asm2, "{}{}", rec, hq_suffix)?;
+                }
+                if seen_chroms.len() > 1 {
+                    let qname = cluster_asm2[0].split('\t').next().unwrap_or("");
+                    emit_span_paf(&mut span_writer, qname, &seen_chroms, "asm2")?;
                 }
             }
             crate::Winner::Both => {
                 count_equal += 1; // increment read counter
                 //if user specifies --both, write equal scoring reads to both output files
                 if args.both {
+                    let mut seen_chroms1: Vec<String> = Vec::with_capacity(4);
                     for rec in cluster_asm1.iter_mut() {
+                        if span_writer.is_some() {
+                            if let Some(tname) = paf_span_chrom(rec) {
+                                if !seen_chroms1.iter().any(|s| s == tname) {
+                                    seen_chroms1.push(tname.to_string());
+                                }
+                            }
+                        }
                         writeln!(out_asm1, "{}{}", rec, hq_suffix)?;
                     }
+                    if seen_chroms1.len() > 1 {
+                        let qname = cluster_asm1[0].split('\t').next().unwrap_or("");
+                        emit_span_paf(&mut span_writer, qname, &seen_chroms1, "asm1")?;
+                    }
+                    let mut seen_chroms2: Vec<String> = Vec::with_capacity(4);
                     for rec in cluster_asm2.iter_mut() {
+                        if span_writer.is_some() {
+                            if let Some(tname) = paf_span_chrom(rec) {
+                                if !seen_chroms2.iter().any(|s| s == tname) {
+                                    seen_chroms2.push(tname.to_string());
+                                }
+                            }
+                        }
                         writeln!(out_asm2, "{}{}", rec, hq_suffix)?;
+                    }
+                    if seen_chroms2.len() > 1 {
+                        let qname = cluster_asm2[0].split('\t').next().unwrap_or("");
+                        emit_span_paf(&mut span_writer, qname, &seen_chroms2, "asm2")?;
                     }
                 //default behavior is randomly assign equal scoring read to one file
                 } else {
                     //hash read name and use last bit value to assign to asm1 or asm2
                     //ensures that assignments will be reproducible
-                    let qname = cluster_asm1[0].split('\t').next().unwrap();
+                    //own the qname so we can use it after the mutable iteration loops below
+                    let qname = cluster_asm1[0].split('\t').next().unwrap().to_string();
                     match crate::choose_random(qname.as_bytes()) {
                         crate::Winner::Asm1 => {
+                            let mut seen_chroms: Vec<String> = Vec::with_capacity(4);
                             for rec in cluster_asm1.iter_mut() {
+                                if span_writer.is_some() {
+                                    if let Some(tname) = paf_span_chrom(rec) {
+                                        if !seen_chroms.iter().any(|s| s == tname) {
+                                            seen_chroms.push(tname.to_string());
+                                        }
+                                    }
+                                }
                                 writeln!(out_asm1, "{}{}", rec, hq_suffix)?;
+                            }
+                            if seen_chroms.len() > 1 {
+                                emit_span_paf(&mut span_writer, &qname, &seen_chroms, "asm1")?;
                             }
                         }
                         _ => {
+                            let mut seen_chroms: Vec<String> = Vec::with_capacity(4);
                             for rec in cluster_asm2.iter_mut() {
+                                if span_writer.is_some() {
+                                    if let Some(tname) = paf_span_chrom(rec) {
+                                        if !seen_chroms.iter().any(|s| s == tname) {
+                                            seen_chroms.push(tname.to_string());
+                                        }
+                                    }
+                                }
                                 writeln!(out_asm2, "{}{}", rec, hq_suffix)?;
+                            }
+                            if seen_chroms.len() > 1 {
+                                emit_span_paf(&mut span_writer, &qname, &seen_chroms, "asm2")?;
                             }
                         }
                     }
@@ -133,6 +344,14 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
 
     }
+    //explicitly flush all writers so disk-full / I/O errors surface as Err instead of
+    //being silently swallowed by BufWriter::drop
+    out_asm1.flush().map_err(|e| format!("Failed to flush '{}': {}", asm1_out_path, e))?;
+    out_asm2.flush().map_err(|e| format!("Failed to flush '{}': {}", asm2_out_path, e))?;
+    if let Some(w) = span_writer.as_mut() {
+        w.flush().map_err(|e| format!("Failed to flush '{}': {}", span_path, e))?;
+    }
+
     //print summary statistics to terminal
     let total = count_asm1 + count_asm2 + count_equal + count_unmapped;
     eprintln!("Reads aligned better to {}: {} ({:.1}%)", args.s1, count_asm1, count_asm1 as f64 / total as f64 * 100.0);
@@ -271,7 +490,7 @@ pub fn get_weighted_score(cur_clust : &Vec<String>, tag_prefix: &str) -> Result<
 
 }
 
-pub fn compare_clusters<'a>(clust1:&'a Vec<String>, clust2:&'a Vec<String>, args: &Cli) ->  Result<(crate::Winner, Option<u8>), Box<dyn std::error::Error>> {
+pub fn compare_clusters<'a>(clust1:&'a Vec<String>, clust2:&'a Vec<String>, args: &Cli, match_sc: f32) ->  Result<(crate::Winner, Option<u8>), Box<dyn std::error::Error>> {
 
     match (clust1[0].split('\t').nth(5), clust2[0].split('\t').nth(5)) {
         (Some("*"), Some("*")) => {return Ok((crate::Winner::Unmapped, None));}, // both reads unmapped
@@ -288,10 +507,10 @@ pub fn compare_clusters<'a>(clust1:&'a Vec<String>, clust2:&'a Vec<String>, args
     //return respective winner depending on which AS is higher,
     //both is a special case that can be determined by user input
     if score1 > score2 {
-        let hapq = if args.no_hapq { None } else { Some(crate::compute_hapq(score1, score2, n_splits1, args.match_sc)) };
+        let hapq = if args.no_hapq { None } else { Some(crate::compute_hapq(score1, score2, n_splits1, match_sc)) };
         Ok((crate::Winner::Asm1, hapq))
     } else if score1 < score2 {
-        let hapq = if args.no_hapq { None } else { Some(crate::compute_hapq(score2, score1, n_splits2, args.match_sc)) };
+        let hapq = if args.no_hapq { None } else { Some(crate::compute_hapq(score2, score1, n_splits2, match_sc)) };
         Ok((crate::Winner::Asm2, hapq))
     } else {
         let hapq = if args.no_hapq { None } else { Some(0u8) };

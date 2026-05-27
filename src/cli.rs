@@ -42,12 +42,16 @@ pub struct Cli {
     pub ref2: Option<String>,
 
     // per-base match score from aligner scoring scheme (used in HAPQ calculation)
-    #[arg(long, value_name = "FLOAT", default_value_t = 2.0, help = "per-base match score from aligner scoring scheme (e.g. minimap2 default is 2.0 for long reads)")]
-    pub match_sc: f32,
+    #[arg(short = 'A' , long, value_name = "FLOAT", help = "per-base match score from aligner scoring scheme (auto-estimated from ms:i tags if omitted)")]
+    pub match_sc: Option<f32>,
 
     // skip HAPQ score calculation and hq tag output (for non-haplotype comparisons)
-    #[arg(long, default_value_t = false, help = "skip HAPQ score calculation and hq tag output (e.g. for comparing grch38 vs chm13)")]
+    #[arg(long, default_value_t = false, help = "skip HAPQ score calculation and hq tag output (e.g. for comparing GRCh38 vs CHM13)")]
     pub no_hapq: bool,
+
+    // disable writing the list of chromosome-spanning reads
+    #[arg(long, default_value_t = false, help = "disable writing diplinator_{s1}_{s2}_span_chrom.txt (list of reads whose winning cluster has alignments on multiple chromosomes; useful for diploid-genome re-alignment follow-up)")]
+    pub no_span_chrom: bool,
 
     // number of total threads to use
     #[arg(short, long,value_name = "INT", default_value_t = 8, help = "Total thread pool size (min 4). Multiples of 8 recommended for optimal read/write balance.")]
