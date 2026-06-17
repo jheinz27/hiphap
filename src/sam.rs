@@ -204,9 +204,7 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     //open side writer for reads whose winning cluster spans multiple chromosomes (unless disabled)
-    //per-run filename mirrors the BAM/SAM output naming so concurrent runs in the same cwd
-    //do not overwrite each other's span file
-    let span_path = format!("diplinator_{}_{}_span_chrom.txt", args.s1, args.s2);
+    let span_path = format!("diplinator_{}_{}_span_chrom.fastq", args.s1, args.s2);
     let mut span_writer: Option<BufWriter<File>> = if args.no_span_chrom {
         None
     } else {
@@ -218,7 +216,7 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     //call below mutably borrows the reader, so we can't reach back to the header inside the loop)
     let asm1_hdr = asm1_reader.header().to_owned();
     let asm2_hdr = asm2_reader.header().to_owned();
-    //pre-compute target name slices once; otherwise emit_span would re-walk the header text
+    //pre-compute target name slices once; otherwise emit_span_fastq would re-walk the header text
     //for every chrom-spanning read
     let asm1_names = asm1_hdr.target_names();
     let asm2_names = asm2_hdr.target_names();
@@ -290,32 +288,44 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             crate::Winner::Asm1 => {
                 count_asm1 += 1; // increment read counter
                 let mut seen_tids: Vec<i32> = Vec::with_capacity(4);
-                for rec in cluster_asm1.iter_mut() {
+                let mut primary_idx: Option<usize> = None;
+                for (i, rec) in cluster_asm1.iter_mut().enumerate() {
                     if span_writer.is_some() && !rec.is_secondary() && !rec.is_unmapped() {
                         let t = rec.tid();
                         if !seen_tids.contains(&t) { seen_tids.push(t); }
+                        if !rec.is_supplementary() { primary_idx = Some(i); }
                     }
                     if let Some(hq) = hapq { rec.push_aux(b"hq", Aux::U8(hq))?; }
                     out_asm1.write(rec)?;
                 }
                 if seen_tids.len() > 1 {
-                    emit_span(&mut span_writer, cluster_asm1[0].qname(), &seen_tids, &asm1_names, "asm1")?;
+                    if let Some(idx) = primary_idx {
+                        let rec = &cluster_asm1[idx];
+                        let (seq, qual) = oriented_seq_qual(rec);
+                        emit_span_fastq(&mut span_writer, rec.qname(), &seq, &qual, &seen_tids, &asm1_names, "asm1")?;
+                    }
                 }
             }
             //asm2 clear winner, write to out_asm2
             crate::Winner::Asm2 => {
                 count_asm2 += 1; // increment read counter
                 let mut seen_tids: Vec<i32> = Vec::with_capacity(4);
-                for rec in cluster_asm2.iter_mut() {
+                let mut primary_idx: Option<usize> = None;
+                for (i, rec) in cluster_asm2.iter_mut().enumerate() {
                     if span_writer.is_some() && !rec.is_secondary() && !rec.is_unmapped() {
                         let t = rec.tid();
                         if !seen_tids.contains(&t) { seen_tids.push(t); }
+                        if !rec.is_supplementary() { primary_idx = Some(i); }
                     }
                     if let Some(hq) = hapq { rec.push_aux(b"hq", Aux::U8(hq))?; }
                     out_asm2.write(rec)?;
                 }
                 if seen_tids.len() > 1 {
-                    emit_span(&mut span_writer, cluster_asm2[0].qname(), &seen_tids, &asm2_names, "asm2")?;
+                    if let Some(idx) = primary_idx {
+                        let rec = &cluster_asm2[idx];
+                        let (seq, qual) = oriented_seq_qual(rec);
+                        emit_span_fastq(&mut span_writer, rec.qname(), &seq, &qual, &seen_tids, &asm2_names, "asm2")?;
+                    }
                 }
             }
             crate::Winner::Both => {
@@ -323,28 +333,40 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 //if user specifices --both, write equal scoring reads to output files
                 if args.both {
                     let mut seen_tids1: Vec<i32> = Vec::with_capacity(4);
-                    for rec in cluster_asm1.iter_mut() {
+                    let mut primary_idx1: Option<usize> = None;
+                    for (i, rec) in cluster_asm1.iter_mut().enumerate() {
                         if span_writer.is_some() && !rec.is_secondary() && !rec.is_unmapped() {
                             let t = rec.tid();
                             if !seen_tids1.contains(&t) { seen_tids1.push(t); }
+                            if !rec.is_supplementary() { primary_idx1 = Some(i); }
                         }
                         if let Some(hq) = hapq { rec.push_aux(b"hq", Aux::U8(hq))?; }
                         out_asm1.write(rec)?;
                     }
                     if seen_tids1.len() > 1 {
-                        emit_span(&mut span_writer, cluster_asm1[0].qname(), &seen_tids1, &asm1_names, "asm1")?;
+                        if let Some(idx) = primary_idx1 {
+                            let rec = &cluster_asm1[idx];
+                            let (seq, qual) = oriented_seq_qual(rec);
+                            emit_span_fastq(&mut span_writer, rec.qname(), &seq, &qual, &seen_tids1, &asm1_names, "asm1")?;
+                        }
                     }
                     let mut seen_tids2: Vec<i32> = Vec::with_capacity(4);
-                    for rec in cluster_asm2.iter_mut() {
+                    let mut primary_idx2: Option<usize> = None;
+                    for (i, rec) in cluster_asm2.iter_mut().enumerate() {
                         if span_writer.is_some() && !rec.is_secondary() && !rec.is_unmapped() {
                             let t = rec.tid();
                             if !seen_tids2.contains(&t) { seen_tids2.push(t); }
+                            if !rec.is_supplementary() { primary_idx2 = Some(i); }
                         }
                         if let Some(hq) = hapq { rec.push_aux(b"hq", Aux::U8(hq))?; }
                         out_asm2.write(rec)?;
                     }
                     if seen_tids2.len() > 1 {
-                        emit_span(&mut span_writer, cluster_asm2[0].qname(), &seen_tids2, &asm2_names, "asm2")?;
+                        if let Some(idx) = primary_idx2 {
+                            let rec = &cluster_asm2[idx];
+                            let (seq, qual) = oriented_seq_qual(rec);
+                            emit_span_fastq(&mut span_writer, rec.qname(), &seq, &qual, &seen_tids2, &asm2_names, "asm2")?;
+                        }
                     }
                 //default behavior is randomly assign equal scoring read to one file
                 } else {
@@ -353,30 +375,42 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                     match crate::choose_random(cluster_asm1[0].qname()) {
                         crate::Winner::Asm1 => {
                             let mut seen_tids: Vec<i32> = Vec::with_capacity(4);
-                            for rec in cluster_asm1.iter_mut() {
+                            let mut primary_idx: Option<usize> = None;
+                            for (i, rec) in cluster_asm1.iter_mut().enumerate() {
                                 if span_writer.is_some() && !rec.is_secondary() && !rec.is_unmapped() {
                                     let t = rec.tid();
                                     if !seen_tids.contains(&t) { seen_tids.push(t); }
+                                    if !rec.is_supplementary() { primary_idx = Some(i); }
                                 }
                                 if let Some(hq) = hapq { rec.push_aux(b"hq", Aux::U8(hq))?; }
                                 out_asm1.write(rec)?;
                             }
                             if seen_tids.len() > 1 {
-                                emit_span(&mut span_writer, cluster_asm1[0].qname(), &seen_tids, &asm1_names, "asm1")?;
+                                if let Some(idx) = primary_idx {
+                                    let rec = &cluster_asm1[idx];
+                                    let (seq, qual) = oriented_seq_qual(rec);
+                                    emit_span_fastq(&mut span_writer, rec.qname(), &seq, &qual, &seen_tids, &asm1_names, "asm1")?;
+                                }
                             }
                         }
                         _ => {
                             let mut seen_tids: Vec<i32> = Vec::with_capacity(4);
-                            for rec in cluster_asm2.iter_mut() {
+                            let mut primary_idx: Option<usize> = None;
+                            for (i, rec) in cluster_asm2.iter_mut().enumerate() {
                                 if span_writer.is_some() && !rec.is_secondary() && !rec.is_unmapped() {
                                     let t = rec.tid();
                                     if !seen_tids.contains(&t) { seen_tids.push(t); }
+                                    if !rec.is_supplementary() { primary_idx = Some(i); }
                                 }
                                 if let Some(hq) = hapq { rec.push_aux(b"hq", Aux::U8(hq))?; }
                                 out_asm2.write(rec)?;
                             }
                             if seen_tids.len() > 1 {
-                                emit_span(&mut span_writer, cluster_asm2[0].qname(), &seen_tids, &asm2_names, "asm2")?;
+                                if let Some(idx) = primary_idx {
+                                    let rec = &cluster_asm2[idx];
+                                    let (seq, qual) = oriented_seq_qual(rec);
+                                    emit_span_fastq(&mut span_writer, rec.qname(), &seq, &qual, &seen_tids, &asm2_names, "asm2")?;
+                                }
                             }
                         }
                     }
@@ -649,27 +683,78 @@ fn get_query_start(rec: &Record) -> u32 {
 }
 
 
-//write one line to the chrom-spanning side file: qname \t chrom1,chrom2,... \t asm_label
-//chrom names are resolved via the caller-provided target_names slice (computed once,
-//not once per spanning event). unmapped tids (-1) and out-of-bounds tids are dropped safely.
-//chrom order in the output is insertion order = order of appearance in the cluster
-//(i.e. primary first, then supplementaries), which is more informative than alphabetical
-fn emit_span(
+//complement a single base, preserving case; unknown/ambiguity codes -> N
+fn complement_base(b: u8) -> u8 {
+    match b {
+        b'A' => b'T', b'T' => b'A', b'C' => b'G', b'G' => b'C',
+        b'a' => b't', b't' => b'a', b'c' => b'g', b'g' => b'c',
+        b'N' | b'n' => b,
+        _ => b'N',
+    }
+}
+
+//function to reverse complement sequece and quality vals to have 
+//output fastq of chromosome spannign reads be in the original oritnetation 
+//as the input fasta file to the aligner
+fn oriented_seq_qual(rec: &Record) -> (Vec<u8>, Vec<u8>) {
+    let mut seq = rec.seq().as_bytes();
+    let mut qual = rec.qual().to_vec();
+    if rec.is_reverse() {
+        //rev comp sequence to get original read orientation
+        seq.reverse();
+        for b in seq.iter_mut() { *b = complement_base(*b); }
+        //reverse quality score to match reversed bases
+        qual.reverse();
+    }
+    (seq, qual)
+}
+
+//claude code assisted  
+//write one FASTQ record for a read whose winning cluster spans multiple chromosomes:
+fn emit_span_fastq(
     w: &mut Option<BufWriter<File>>,
     qname: &[u8],
+    seq: &[u8],
+    qual: &[u8],
     tids: &[i32],
     names: &[&[u8]],
     label: &str,
 ) -> std::io::Result<()> {
     if let Some(file) = w {
         let q = std::str::from_utf8(qname).unwrap_or("?");
+        //if primary record has no stored sequence, skip with warning
+        if seq.is_empty() {
+            eprintln!("warning: chrom-spanning read '{}' has no stored sequence; skipping FASTQ record", q);
+            return Ok(());
+        }
+
+        //get unique chromosomes that the read spans
         let chroms: Vec<&str> = tids.iter()
             .filter(|&&t| t >= 0)
             .map(|&t| names.get(t as usize)
                 .and_then(|n| std::str::from_utf8(n).ok())
                 .unwrap_or("?"))
             .collect();
-        writeln!(file, "{}\t{}\t{}", q, chroms.join(","), label)?;
+
+        // append the asm label and chrom list to header
+        writeln!(file, "@{}\t{}\t{}", q, label, chroms.join(","))?;
+        file.write_all(seq)?;
+        writeln!(file)?;
+        writeln!(file, "+")?;
+
+      
+        let missing = qual.is_empty() || qual[0] == 0xFF;
+        if missing {
+            //write placeholder phred values if quality scores missing
+            eprintln!("warning: chrom-spanning read '{}' has no quality scores; writing placeholder Phred-0 qualities", q);
+            let placeholder = vec![b'!'; seq.len()];
+            file.write_all(&placeholder)?;
+        } else {
+            //convert phred to ascii representation
+            let ascii: Vec<u8> = qual.iter().map(|&p| p + 33).collect();
+            file.write_all(&ascii)?;
+        }
+        writeln!(file)?;
     }
     Ok(())
 }

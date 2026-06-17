@@ -84,10 +84,7 @@ pub fn estimate_minimap2_a_paf(paf_path: &str) -> Result<i32, Box<dyn std::error
 }
 
 
-//write one line to the chrom-spanning side file: qname \t chrom1,chrom2,... \t asm_label
-//(PAF variant: contig names are already strings, no header lookup needed)
-//chrom order is insertion order = order of appearance in the cluster (primary first,
-//then supplementaries), which is more informative than alphabetical
+//write one line to the chrom-spanning file: qname \t chrom1,chrom2,... \t asm_label
 fn emit_span_paf(
     w: &mut Option<BufWriter<File>>,
     qname: &str,
@@ -101,10 +98,8 @@ fn emit_span_paf(
 }
 
 
-//single-pass parse of a PAF line for span tracking: returns the target name (col 5)
-//if the line is a mapped, non-secondary primary alignment; None otherwise.
-//walks each tab-separated field exactly once and stops as soon as both signals are known.
-fn paf_span_chrom(rec: &str) -> Option<&str> {
+//get chrom of alignment if mapped and non secondary 
+fn paf_get_chrom(rec: &str) -> Option<&str> {
     let mut tname: Option<&str> = None;
     for (i, f) in rec.split('\t').enumerate() {
         match i {
@@ -113,10 +108,10 @@ fn paf_span_chrom(rec: &str) -> Option<&str> {
                 tname = Some(f);
             }
             i if i >= 12 => {
-                // optional tags start at col 12; bail as soon as we see a secondary marker
+                //ignore secondary alignments
                 if f == "tp:A:S" { return None; }
             }
-            _ => {} // mandatory cols 0..=4, 6..=11 don't affect span tracking
+            _ => {} 
         }
     }
     tname
@@ -221,7 +216,7 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let mut seen_chroms: Vec<String> = Vec::with_capacity(4);
                 for rec in cluster_asm1.iter_mut() {
                     if span_writer.is_some() {
-                        if let Some(tname) = paf_span_chrom(rec) {
+                        if let Some(tname) = paf_get_chrom(rec) {
                             if !seen_chroms.iter().any(|s| s == tname) {
                                 seen_chroms.push(tname.to_string());
                             }
@@ -240,7 +235,7 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let mut seen_chroms: Vec<String> = Vec::with_capacity(4);
                 for rec in cluster_asm2.iter_mut() {
                     if span_writer.is_some() {
-                        if let Some(tname) = paf_span_chrom(rec) {
+                        if let Some(tname) = paf_get_chrom(rec) {
                             if !seen_chroms.iter().any(|s| s == tname) {
                                 seen_chroms.push(tname.to_string());
                             }
@@ -260,7 +255,7 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                     let mut seen_chroms1: Vec<String> = Vec::with_capacity(4);
                     for rec in cluster_asm1.iter_mut() {
                         if span_writer.is_some() {
-                            if let Some(tname) = paf_span_chrom(rec) {
+                            if let Some(tname) = paf_get_chrom(rec) {
                                 if !seen_chroms1.iter().any(|s| s == tname) {
                                     seen_chroms1.push(tname.to_string());
                                 }
@@ -275,7 +270,7 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                     let mut seen_chroms2: Vec<String> = Vec::with_capacity(4);
                     for rec in cluster_asm2.iter_mut() {
                         if span_writer.is_some() {
-                            if let Some(tname) = paf_span_chrom(rec) {
+                            if let Some(tname) = paf_get_chrom(rec) {
                                 if !seen_chroms2.iter().any(|s| s == tname) {
                                     seen_chroms2.push(tname.to_string());
                                 }
@@ -298,7 +293,7 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                             let mut seen_chroms: Vec<String> = Vec::with_capacity(4);
                             for rec in cluster_asm1.iter_mut() {
                                 if span_writer.is_some() {
-                                    if let Some(tname) = paf_span_chrom(rec) {
+                                    if let Some(tname) = paf_get_chrom(rec) {
                                         if !seen_chroms.iter().any(|s| s == tname) {
                                             seen_chroms.push(tname.to_string());
                                         }
@@ -314,7 +309,7 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                             let mut seen_chroms: Vec<String> = Vec::with_capacity(4);
                             for rec in cluster_asm2.iter_mut() {
                                 if span_writer.is_some() {
-                                    if let Some(tname) = paf_span_chrom(rec) {
+                                    if let Some(tname) = paf_get_chrom(rec) {
                                         if !seen_chroms.iter().any(|s| s == tname) {
                                             seen_chroms.push(tname.to_string());
                                         }

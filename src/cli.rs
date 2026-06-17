@@ -50,7 +50,7 @@ pub struct Cli {
     pub no_hapq: bool,
 
     // disable writing the list of chromosome-spanning reads
-    #[arg(long, default_value_t = false, help = "disable writing diplinator_{s1}_{s2}_span_chrom.txt (list of reads whose winning cluster has alignments on multiple chromosomes; useful for diploid-genome re-alignment follow-up)")]
+    #[arg(long, default_value_t = false, help = "disable writing diplinator_{s1}_{s2}_span_chrom.fastq")]
     pub no_span_chrom: bool,
 
     // number of total threads to use
