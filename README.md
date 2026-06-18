@@ -33,26 +33,29 @@ Arguments:
   <ASM2>  asm2 alignment file (sam/bam/cram/paf)
 
 Options:
-  -1, --s1 <NAME>          label for asm1 sample (used in output file names and summary) [default: asm1]
-  -2, --s2 <NAME>          label for asm2 sample (used in output file names and summary) [default: asm2]
-      --paf                input files are PAF
-      --ms                 use ms:i: tag rather than AS:i: for alignment score
-  -b, --both               write reads with equal alignment scores to both output files
-  -u, --unmapped <DEST>    where to write reads unmapped in both assemblies: asm1, asm2, or discard [default: asm1] [possible values: asm1, asm2, discard]
-      --ref1 <FILE>        reference FASTA for cram file (asm1)
-      --ref2 <FILE>        reference FASTA for cram file (asm2)
-      --match-sc <FLOAT>   per-base match score from aligner scoring scheme (e.g. minimap2 default is 2.0 for long reads) [default: 2.0]
-      --no-hapq            skip HAPQ score calculation and hq tag output (e.g. for comparing grch38 vs chm13)
-  -t, --threads <INT>      Total thread pool size (min 4). Multiples of 8 recommended for optimal read/write balance. [default: 8]
-  -h, --help               Print help
-  -V, --version            Print version
+  -1, --s1 <NAME>         label for asm1 sample (used in output file names and summary) [default: asm1]
+  -2, --s2 <NAME>         label for asm2 sample (used in output file names and summary) [default: asm2]
+      --paf               input files are PAF
+      --ms                use ms:i: tag rather than AS:i: for alignment score
+  -b, --both              write reads with equal alignment scores to both output files
+  -u, --unmapped <DEST>   where to write reads unmapped in both assemblies: asm1, asm2, or discard [default: asm1] [possible values: asm1, asm2, discard]
+      --ref1 <FILE>       reference FASTA for cram file (asm1)
+      --ref2 <FILE>       reference FASTA for cram file (asm2)
+  -A, --match-sc <FLOAT>  per-base match score from aligner scoring scheme (auto-estimated from ms:i tags if omitted)
+      --no-hapq           skip HAPQ score calculation and hq tag output (e.g. for comparing GRCh38 vs CHM13)
+      --no-span-chrom     disable writing hiphap_{s1}_{s2}_span_chrom.fastq
+  -t, --threads <INT>     Total thread pool size (min 4). Multiples of 8 recommended for optimal read/write balance. [default: 8]
+  -h, --help              Print help
+  -V, --version           Print version
 ```
 
 Each output record is annotated with an `hq:i:` tag carrying the HAPQ score (see [HAPQ](#hapq-haplotype-assignment-quality)), unless `--no-hapq` is set.
 
+The per-base match score used by the HAPQ calculation is auto-estimated from the `ms:i:` tags of the input files. Pass `-A`/`--match-sc <FLOAT>` to set it explicitly (e.g. `2.0` for minimap2 long-read defaults).
+
 ## Example Workflow
 
-HipHap only works on name-sorted files, which is the default [minimap2](https://github.com/lh3/minimap2) output. Therefore, coordinate-sorted files need to b name-sort first, for example:
+HipHap only works on name-sorted files, which is the default [minimap2](https://github.com/lh3/minimap2) output. Therefore, coordinate-sorted files need to be name-sorted first, for example:
 
 ```bash
 samtools sort -n -o name_sort.bam index_sort.bam
@@ -71,7 +74,7 @@ minimap2 -ax map-hifi -o asm2_alignments.sam hg002v1.1.PATERNAL.fa reads.fastq
 
 # Run hiphap
 hiphap -1 mat -2 pat asm1_alignments.sam asm2_alignments.sam
-# Output: hiphap_mat.sam  hiphap_pat.sam
+# Output: hiphap_mat.sam  hiphap_pat.sam  hiphap_mat_pat_span_chrom.fastq
 
 # Merge best alignments into one file (if desired)
 samtools merge -@ 12 merged.sam hiphap_mat.sam hiphap_pat.sam
@@ -79,6 +82,8 @@ samtools merge -@ 12 merged.sam hiphap_mat.sam hiphap_pat.sam
 # Save as sorted BAM
 samtools sort -@ 12 -o merged.bam merged.sam
 ```
+
+By default, HipHap also writes `hiphap_{s1}_{s2}_span_chrom.fastq`, a FASTQ of reads whose alignments span more than one chromosome. These reads are emitted for easy realignment. Pass `--no-span-chrom` to skip writing this file.
 
 ### Comparing different reference genomes
 
@@ -143,7 +148,7 @@ For each read, the assembly with the higher $S$ wins; its full alignment cluster
 
 For each read assigned to a winning haplotype, HipHap reports a HapQ score in the `hq:i:` tag of the output record. HapQ is a Phred-like confidence [0-60] that the read was assigned to the correct haplotype. The calculation is modeled on BWA-MEM's `mem_approx_mapq_se`.
 
-Let $S_w$ and $S_l$ be the weighted alignment scores of the winning and losing assemblies, $m$ the per-base match scoreof the alignment software used (`--match-sc`, default `2.0`), and $k$ the number of non-secondary alignments (splits) on the winning side.
+Let $S_w$ and $S_l$ be the weighted alignment scores of the winning and losing assemblies, $m$ the per-base match score of the alignment software used (`-A`/`--match-sc`, auto-estimated from the `ms:i:` tags of the input files when not set explicitly), and $k$ the number of non-secondary alignments (splits) on the winning side.
 
 HapQ is the product of: 
 
