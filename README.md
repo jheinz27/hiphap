@@ -1,9 +1,9 @@
-# The Diplinator
+# HipHap
 
 Diploid genome assemblies are now routinely available, but most read aligners were designed for haploid references. When reads are aligned to a diploid assembly, the aligner sees two nearly identical alignments to either haplotype, and thus reduces the mapping quality (MapQ) score to reflect this ambiguity. This can cause downstream tools to discard reads from easily mappable regions.
-Diplinator resolves this issue by aligning reads to each haplotype assembly separately and assigning each read to its best-supported haplotype. We also introduce a haplotype assignment quality score (HapQ) in Diplinator to quantify confidence in the haplotype of origin of a read.
+HipHap resolves this issue by aligning reads to each haplotype assembly separately and assigning each read to its best-supported haplotype. We also introduce a haplotype assignment quality score (HapQ) in HipHap to quantify confidence in the haplotype of origin of a read.
 
-Diplinator is implemented in Rust, and supports SAM, BAM, CRAM, and PAF formats
+HipHap is implemented in Rust, and supports SAM, BAM, CRAM, and PAF formats
 
 
 ## Installation
@@ -15,18 +15,18 @@ Recommended: Download precompiled binary:
 
 Build from source:
 ```bash
-git clone https://github.com/jheinz27/diplinator.git
-cd diplinator
+git clone https://github.com/jheinz27/hiphap.git
+cd hiphap
 cargo build --release
-./target/release/diplinator
+./target/release/hiphap
 ```
 
 ## Usage
 
 ```
-Diplinator: Choose the best alignment to each haploid of a diploid assembly
+HipHap: Choose the best alignment to each haploid of a diploid assembly
 
-Usage: diplinator [OPTIONS] <ASM1> <ASM2>
+Usage: hiphap [OPTIONS] <ASM1> <ASM2>
 
 Arguments:
   <ASM1>  asm1 alignment file (sam/bam/cram/paf)
@@ -52,7 +52,7 @@ Each output record is annotated with an `hq:i:` tag carrying the HAPQ score (see
 
 ## Example Workflow
 
-Diplinator only works on name-sorted files, which is the default [minimap2](https://github.com/lh3/minimap2) output. Therefore, coordinate-sorted files need to b name-sort first, for example:
+HipHap only works on name-sorted files, which is the default [minimap2](https://github.com/lh3/minimap2) output. Therefore, coordinate-sorted files need to b name-sort first, for example:
 
 ```bash
 samtools sort -n -o name_sort.bam index_sort.bam
@@ -69,12 +69,12 @@ separate_haps_fasta -1 MATERNAL -2 PATERNAL hg002v1.1.fa
 minimap2 -ax map-hifi -o asm1_alignments.sam hg002v1.1.MATERNAL.fa reads.fastq
 minimap2 -ax map-hifi -o asm2_alignments.sam hg002v1.1.PATERNAL.fa reads.fastq
 
-# Run diplinator
-diplinator -1 mat -2 pat asm1_alignments.sam asm2_alignments.sam
-# Output: diplinator_mat.sam  diplinator_pat.sam
+# Run hiphap
+hiphap -1 mat -2 pat asm1_alignments.sam asm2_alignments.sam
+# Output: hiphap_mat.sam  hiphap_pat.sam
 
 # Merge best alignments into one file (if desired)
-samtools merge -@ 12 merged.sam diplinator_mat.sam diplinator_pat.sam
+samtools merge -@ 12 merged.sam hiphap_mat.sam hiphap_pat.sam
 
 # Save as sorted BAM
 samtools sort -@ 12 -o merged.bam merged.sam
@@ -82,11 +82,11 @@ samtools sort -@ 12 -o merged.bam merged.sam
 
 ### Comparing different reference genomes
 
-Diplinator can also be used to select best alignments between different reference genomes (e.g. GRCh38 and CHM13). For this use case, the HAPQ score is generally not meaningful, so pass `--no-hapq` to skip its calculation:
+HipHap can also be used to select best alignments between different reference genomes (e.g. GRCh38 and CHM13). For this use case, the HAPQ score is generally not meaningful, so pass `--no-hapq` to skip its calculation:
 
 ```bash
-diplinator --no-hapq -1 grch38 -2 chm13 grch38_alignments.sam chm13_alignments.sam
-# Output: diplinator_grch38.sam  diplinator_chm13.sam
+hiphap --no-hapq -1 grch38 -2 chm13 grch38_alignments.sam chm13_alignments.sam
+# Output: hiphap_grch38.sam  hiphap_chm13.sam
 ```
 
 ### CRAM input files
@@ -94,7 +94,7 @@ diplinator --no-hapq -1 grch38 -2 chm13 grch38_alignments.sam chm13_alignments.s
 If input files are CRAM format, the original reference genomes must be provided, for example:
 
 ```bash
-diplinator --ref1 asm1_hap.fasta --ref2 asm2_hap.fasta asm1_alignments.cram asm2_alignments.cram
+hiphap --ref1 asm1_hap.fasta --ref2 asm2_hap.fasta asm1_alignments.cram asm2_alignments.cram
 ```
 
 ## Example PAF Usage
@@ -105,13 +105,13 @@ diplinator --ref1 asm1_hap.fasta --ref2 asm2_hap.fasta asm1_alignments.cram asm2
 minimap2 -cx map-hifi -o asm1_alignments.paf hg002v1.1.MATERNAL.fa reads.fastq
 minimap2 -cx map-hifi -o asm2_alignments.paf hg002v1.1.PATERNAL.fa reads.fastq
 
-diplinator --paf out_asm1.paf out_asm2.paf
-# Output: diplinator_asm1.paf  diplinator_asm2.paf
+hiphap --paf out_asm1.paf out_asm2.paf
+# Output: hiphap_asm1.paf  hiphap_asm2.paf
 ```
 
 ## Weighted Alignment Scoring Mechanism
 
-For each read, Diplinator computes a single weighted alignment score per assembly using all primary and supplementary alignments (secondary alignments are passed through to the output but ignored when scoring).
+For each read, HipHap computes a single weighted alignment score per assembly using all primary and supplementary alignments (secondary alignments are passed through to the output but ignored when scoring).
 
 Let $n$ be the number of primary and supplementary alignments for a given read to that reference genome.
 
@@ -141,7 +141,7 @@ For each read, the assembly with the higher $S$ wins; its full alignment cluster
 
 ## HapQ (haplotype assignment quality)
 
-For each read assigned to a winning haplotype, Diplinator reports a HapQ score in the `hq:i:` tag of the output record. HapQ is a Phred-like confidence [0-60] that the read was assigned to the correct haplotype. The calculation is modeled on BWA-MEM's `mem_approx_mapq_se`.
+For each read assigned to a winning haplotype, HipHap reports a HapQ score in the `hq:i:` tag of the output record. HapQ is a Phred-like confidence [0-60] that the read was assigned to the correct haplotype. The calculation is modeled on BWA-MEM's `mem_approx_mapq_se`.
 
 Let $S_w$ and $S_l$ be the weighted alignment scores of the winning and losing assemblies, $m$ the per-base match scoreof the alignment software used (`--match-sc`, default `2.0`), and $k$ the number of non-secondary alignments (splits) on the winning side.
 
@@ -172,4 +172,4 @@ Special cases:
 If `--no-hapq` is set, HAPQ is not computed and no `hq:i:` tag is added (recommended when the two inputs are not haplotypes of the same sample, e.g. GRCh38 vs CHM13).
 
 ## Citation
-If the Diplinator has helped you in your research, please cite our preprint at: TODO
+If HipHap has helped you in your research, please cite our preprint at: TODO
