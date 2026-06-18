@@ -1,4 +1,4 @@
-# HipHap
+# HipHap (previously Diplinator)
 
 Diploid genome assemblies are now routinely available, but most read aligners were designed for haploid references. When reads are aligned to a diploid assembly, the aligner sees two nearly identical alignments to either haplotype, and thus reduces the mapping quality (MapQ) score to reflect this ambiguity. This can cause downstream tools to discard reads from easily mappable regions.
 HipHap resolves this issue by aligning reads to each haplotype assembly separately and assigning each read to its best-supported haplotype. We also introduce a haplotype assignment quality score (HapQ) in HipHap to quantify confidence in the haplotype of origin of a read.
