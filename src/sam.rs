@@ -16,10 +16,9 @@ use rand::{thread_rng, Rng};
 
 use crate::cli::Cli;
 
-
-// estimate  the minimap2 `-A` (Match score) parameter from an aligned BAM.
-// Samples ~1 in 10,000 mapped reads until 10 reads are sampledd
-// and returns the ceiling of the maximum ms / alignment_length  value.
+// estimate  the minimap2 `-A` (Match score) parameter from alignment file.
+// Samples ~1 in 10,000 primary alignments until 10 reads are sampledd
+//  returns ceiling of the maximum ms / alignment_length as -A estimate
 //claude implemented (checked )
 pub fn estimate_minimap2_a(bam_path: &str, reference: Option<&str>) -> Result<i32, Box<dyn std::error::Error>> {
     let mut reader = bam::Reader::from_path(bam_path)
@@ -152,8 +151,8 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
 
     //create writers for both outputs that share user specified prefix
-    let asm1_out_path = format!("diplinator_{}{}", args.s1, extension);
-    let asm2_out_path = format!("diplinator_{}{}", args.s2, extension);
+    let asm1_out_path = format!("hiphap_{}{}", args.s1, extension);
+    let asm2_out_path = format!("hiphap_{}{}", args.s2, extension);
     //headers are same as in original files, so copy them into output
     let mut out_asm1 = Writer::from_path(&asm1_out_path, &header_asm1, asm1_format)
         .map_err(|e| format!("Failed to create output file '{}': {}", asm1_out_path, e))?;
@@ -204,7 +203,7 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     //open side writer for reads whose winning cluster spans multiple chromosomes (unless disabled)
-    let span_path = format!("diplinator_{}_{}_span_chrom.fastq", args.s1, args.s2);
+    let span_path = format!("hiphap_{}_{}_span_chrom.fastq", args.s1, args.s2);
     let mut span_writer: Option<BufWriter<File>> = if args.no_span_chrom {
         None
     } else {

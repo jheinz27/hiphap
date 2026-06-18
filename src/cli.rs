@@ -2,7 +2,7 @@ use clap::{Parser, ValueEnum};
 
 
 #[derive(Parser, Debug)]
-#[command( name = "Diplinator", about = "Diplinator: Choose the best alignment to each haploid of a diploid assembly", version)]
+#[command( name = "HipHap", about = "HipHap: Choose the best alignment to each haploid of a diploid assembly", version)]
 
 pub struct Cli {
     //
@@ -50,7 +50,7 @@ pub struct Cli {
     pub no_hapq: bool,
 
     // disable writing the list of chromosome-spanning reads
-    #[arg(long, default_value_t = false, help = "disable writing diplinator_{s1}_{s2}_span_chrom.fastq")]
+    #[arg(long, default_value_t = false, help = "disable writing hiphap_{s1}_{s2}_span_chrom.fastq")]
     pub no_span_chrom: bool,
 
     // number of total threads to use

@@ -1,5 +1,5 @@
 use clap::Parser;
-use diplinator::{Cli, paf, sam};
+use hiphap::{Cli, paf, sam};
 use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>>  {

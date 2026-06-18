@@ -143,17 +143,15 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut asm2_iter = BufReader::new(file2).lines().peekable();
 
     //create writers for both outputs that share user specified prefix
-    let asm1_out_path = format!("diplinator_{}.paf", args.s1);
-    let asm2_out_path = format!("diplinator_{}.paf", args.s2);
+    let asm1_out_path = format!("hiphap_{}.paf", args.s1);
+    let asm2_out_path = format!("hiphap_{}.paf", args.s2);
     let mut out_asm1 = BufWriter::new(File::create(&asm1_out_path)
         .map_err(|e| format!("Failed to create output file '{}': {}", asm1_out_path, e))?);
     let mut out_asm2 = BufWriter::new(File::create(&asm2_out_path)
         .map_err(|e| format!("Failed to create output file '{}': {}", asm2_out_path, e))?);
 
     //open side writer for reads whose winning cluster spans multiple chromosomes (unless disabled)
-    //per-run filename mirrors the PAF output naming so concurrent runs in the same cwd
-    //do not overwrite each other's span file
-    let span_path = format!("diplinator_{}_{}_span_chrom.txt", args.s1, args.s2);
+    let span_path = format!("hiphap_{}_{}_span_chrom.txt", args.s1, args.s2);
     let mut span_writer: Option<BufWriter<File>> = if args.no_span_chrom {
         None
     } else {
