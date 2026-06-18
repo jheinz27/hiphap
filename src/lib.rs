@@ -5,7 +5,7 @@ pub mod sam;
 use std::hash::{Hash, Hasher};
 use twox_hash::XxHash64;
 
-//enum to store best alignment or read
+//enum to store best alignment of read
 pub enum Winner {
     Asm1,
     Asm2,
@@ -25,7 +25,7 @@ pub fn choose_random(id: &[u8]) -> Winner {
 
 //compute haplotype assignment quality (HAPQ) score
 //modeled on BWA-MEM's mem_approx_mapq_se (bwamem.c)
-//confidence measure that a read was assigned to the correct haplotype
+//confidence measure that a read is assigned to the correct haplotype
 pub fn compute_hapq(score_winner: f32, score_loser: f32, n_splits: u32, match_sc: f32) -> u8 {
     if score_winner <= 0.0 {
         return 0;
@@ -35,12 +35,12 @@ pub fn compute_hapq(score_winner: f32, score_loser: f32, n_splits: u32, match_sc
     //penalize reads with more that 3 split aligments (likely a complex region)
     let pen_split = if n_splits <= 3 { 1.0 } else { 3.0 / n_splits as f32 };
     let score = 6.02 * diff * pen_split;
-    score.clamp(0.0, 60.0) as u8
+    return score.clamp(0.0, 60.0) as u8; 
     
 }
 
 //helper function to merge any read alignment segments that overlap in read coordinates
-//returns count of unique bps of the read contained in an alignment segment
+//returns count of unique bps of the read contained in any alignment segment
 pub fn merge_intervals(intervals: &mut Vec<(u32, u32)>) -> u32 {
     //sort cluster by read start location of alignment segment
     intervals.sort_unstable_by_key(|k| k.0);

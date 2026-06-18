@@ -23,7 +23,6 @@ pub fn estimate_minimap2_a_paf(paf_path: &str) -> Result<i32, Box<dyn std::error
     let mut max_ratio: f64 = 0.0;
     let mut sampled: u32 = 0;
 
-    //reuse a single String buffer (analog of zero-alloc Record reuse in the BAM path)
     loop {
         line.clear();
         let n = reader.read_line(&mut line)
@@ -43,18 +42,9 @@ pub fn estimate_minimap2_a_paf(paf_path: &str) -> Result<i32, Box<dyn std::error
         let tname    = match fields.next() { Some(v) => v, None => continue };
         if tname == "*" { continue; }
 
-        //~1 in 10,000 sampling (kept after unmapped filter for parity with BAM path)
-        if !rng.gen_bool(0.0001) { continue; }
-
-        //alignment length: qend - qstart (matches get_alignment_len semantics from sam.rs)
-        let qstart: u32 = match qstart_s.parse() { Ok(v) => v, Err(_) => continue };
-        let qend: u32   = match qend_s.parse()   { Ok(v) => v, Err(_) => continue };
-        if qend <= qstart { continue; }
-        let aln_len = qend - qstart;
-
         //skip 6 more fields (tlen, tstart, tend, matches, alnlen, mapq) to reach tags,
         //then walk the optional tags once looking for both tp:A:S (secondary) and ms:i:<n>.
-        //we skip secondaries here to mirror the BAM estimator, which skips is_secondary.
+        //skip secondaries 
         let mut is_secondary = false;
         let mut ms_score: i64 = -1;
         for f in fields.skip(6) {
@@ -64,13 +54,27 @@ pub fn estimate_minimap2_a_paf(paf_path: &str) -> Result<i32, Box<dyn std::error
                 ms_score = v.parse::<i64>().unwrap_or(-1);
             }
         }
-        if is_secondary || ms_score < 0 { continue; }
+        if is_secondary { continue; }
+
+        //~1 in 10,000 random sampling of primary alignments
+        if !rng.gen_bool(0.0001) { continue; }
+
+        //alignment length: qend - qstart (matches get_alignment_len semantics from sam.rs)
+        let qstart: u32 = match qstart_s.parse() { Ok(v) => v, Err(_) => continue };
+        let qend: u32   = match qend_s.parse()   { Ok(v) => v, Err(_) => continue };
+        if qend <= qstart { continue; }
+        let aln_len = qend - qstart;
+
+        if ms_score < 0 { continue; }
 
         let ratio = ms_score as f64 / aln_len as f64;
         if ratio > max_ratio { max_ratio = ratio; }
 
         sampled += 1;
-        if sampled >= 10 { break; }
+        //slightly higher sample size than in sam version since
+        //supplementary alignemnts also have tp:A:P" tag 
+        //and are being checked here
+        if sampled >= 20 { break; }
     }
 
     if sampled == 0 || max_ratio <= 0.0 {
@@ -337,8 +341,7 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
 
     }
-    //explicitly flush all writers so disk-full / I/O errors surface as Err instead of
-    //being silently swallowed by BufWriter::drop
+    //flush all writers 
     out_asm1.flush().map_err(|e| format!("Failed to flush '{}': {}", asm1_out_path, e))?;
     out_asm2.flush().map_err(|e| format!("Failed to flush '{}': {}", asm2_out_path, e))?;
     if let Some(w) = span_writer.as_mut() {

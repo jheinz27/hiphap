@@ -18,7 +18,7 @@ use crate::cli::Cli;
 
 // estimate  the minimap2 `-A` (Match score) parameter from alignment file.
 // Samples ~1 in 10,000 primary alignments until 10 reads are sampledd
-//  returns ceiling of the maximum ms / alignment_length as -A estimate
+// returns ceiling of the maximum ms / alignment_length as -A estimate
 //claude implemented (checked )
 pub fn estimate_minimap2_a(bam_path: &str, reference: Option<&str>) -> Result<i32, Box<dyn std::error::Error>> {
     let mut reader = bam::Reader::from_path(bam_path)
@@ -39,7 +39,7 @@ pub fn estimate_minimap2_a(bam_path: &str, reference: Option<&str>) -> Result<i3
     let mut max_ratio: f64 = 0.0;
     let mut sampled: u32 = 0;
 
-    //zero-allocation iteration: reuse single Record buffer
+    //parse one record at a time looking for primary reads
     while let Some(result) = reader.read(&mut record) {
         result.map_err(|e| format!("Error reading '{}' during -A estimation: {}. Set -A/--match_sc explicitly.", bam_path, e))?;
 
@@ -48,7 +48,7 @@ pub fn estimate_minimap2_a(bam_path: &str, reference: Option<&str>) -> Result<i3
             continue;
         }
 
-        //~1 in 10,000 unbiased random sampling
+        //~1 in 10,000 random sampling
         if !rng.gen_bool(0.0001) { continue; }
 
         //alignment length from CIGAR 
@@ -109,7 +109,7 @@ fn get_format_from_path<P: AsRef<Path>>(path: P) -> Result<bam::Format, Box<dyn 
 
 }
 
-
+//function to check both input files are of same type
 fn formats_equal(a: &bam::Format, b: &bam::Format) -> bool {
     match (a, b) {
         (bam::Format::Bam, bam::Format::Bam) => true,
@@ -153,13 +153,14 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     //create writers for both outputs that share user specified prefix
     let asm1_out_path = format!("hiphap_{}{}", args.s1, extension);
     let asm2_out_path = format!("hiphap_{}{}", args.s2, extension);
+
     //headers are same as in original files, so copy them into output
     let mut out_asm1 = Writer::from_path(&asm1_out_path, &header_asm1, asm1_format)
         .map_err(|e| format!("Failed to create output file '{}': {}", asm1_out_path, e))?;
     let mut out_asm2 = Writer::from_path(&asm2_out_path, &header_asm2, asm2_format)
         .map_err(|e| format!("Failed to create output file '{}': {}", asm2_out_path, e))?;
 
-    //if dealing with a cram file, must set reference fastas and ensure the user provided those
+    //if dealing with a cram file, must set reference fastas and ensure the user provided these
     if let bam::Format::Cram = asm1_format {
         //set fasta reference for both asm1 reader and writer
         if let Some(reference) = &args.ref1 {
@@ -211,12 +212,11 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|e| format!("Failed to create '{}': {}", span_path, e))?))
     };
 
-    //cache owned header views for tid -> contig name resolution (each reader's records()
-    //call below mutably borrows the reader, so we can't reach back to the header inside the loop)
+    //owned header views for tid to contig name mapping, borrowed in writer
     let asm1_hdr = asm1_reader.header().to_owned();
     let asm2_hdr = asm2_reader.header().to_owned();
-    //pre-compute target name slices once; otherwise emit_span_fastq would re-walk the header text
-    //for every chrom-spanning read
+
+    //pre-compute target name slices once 
     let asm1_names = asm1_hdr.target_names();
     let asm2_names = asm2_hdr.target_names();
 
@@ -225,7 +225,7 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let avail_threads = max(4, args.threads);
     //assign write:reader threads (ideally) 3:1
     let r = max(1, avail_threads / 8);
-    //if any additional threads available, assign to writer
+    //if any additional threads available, assign to writers
     //if num threads is odd, leave one idle
     let w = (avail_threads - (2 * r)) / 2;
 
@@ -250,7 +250,7 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut count_equal: u64 = 0;
     let mut count_unmapped: u64 = 0;
 
-    //iterate thorugh both files until they are both exhaused
+    //iterate thorugh both files until they are both fully exhaused
     while asm1_iter.peek().is_some() || asm2_iter.peek().is_some() {
 
         //move forward by one read for both files
@@ -258,7 +258,7 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         get_clusters(&mut asm2_iter, &mut cluster_asm2)?;
 
         // check for possible errors such as:
-        //end of file / empty cluster / clusters don't represent same read in both files
+        //end of file, empty cluster, clusters don't represent same read in both files
         match (cluster_asm1.first(), cluster_asm2.first()) {
 
             (None, None) => break,           // end of file reached for both, should occur at same iteration
@@ -420,13 +420,11 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 match args.unmapped {
                     crate::cli::UnmappedDest::Asm1 => {
                         for rec in cluster_asm1.iter_mut() {
-                            if let Some(hq) = hapq { rec.push_aux(b"hq", Aux::U8(hq))?; }
                             out_asm1.write(rec)?;
                         }
                     }
                     crate::cli::UnmappedDest::Asm2 => {
                         for rec in cluster_asm2.iter_mut() {
-                            if let Some(hq) = hapq { rec.push_aux(b"hq", Aux::U8(hq))?; }
                             out_asm2.write(rec)?;
                         }
                     }
@@ -436,8 +434,7 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
 
     }
-    //explicitly flush the span writer so disk-full / I/O errors surface as Err instead of
-    //being silently swallowed by BufWriter::drop (BAM writers are flushed by htslib at close)
+    // flush span writer 
     if let Some(w) = span_writer.as_mut() {
         w.flush().map_err(|e| format!("Failed to flush '{}': {}", span_path, e))?;
     }
