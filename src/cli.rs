@@ -30,9 +30,16 @@ pub struct Cli {
     #[arg(short, long, default_value_t = false, help = "write reads with equal alignment scores to both output files")]
     pub both: bool,
 
+    // write a single merged output file rather than one file per haplotype
+    #[arg(short = 'm', long, default_value_t = false, help = "write a single merged output file (hiphap_{s1}_{s2}_merged.*) instead of one file per haplotype")]
+    pub merge: bool,
+
+    // combined reference FASTA for writing a merged CRAM (must contain all contigs of both haplotypes)
+    #[arg(long, value_name = "FILE", required = false, help = "combined reference FASTA for merged CRAM output (must contain all contigs of both inputs); required with --merge on CRAM input")]
+    pub ref_merged: Option<String>,
+
     // where to write reads unmapped in both assemblies
     #[arg(short, long, value_name = "DEST", default_value = "asm1", help="where to write reads unmapped in both assemblies: asm1, asm2, or discard")]
-
     pub unmapped: UnmappedDest,
 
     #[arg(long, value_name = "FILE", required = false, help="reference FASTA for cram file (asm1)")]

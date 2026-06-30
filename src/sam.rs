@@ -1,4 +1,5 @@
 use std::cmp::max;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -83,7 +84,6 @@ pub fn estimate_minimap2_a(bam_path: &str, reference: Option<&str>) -> Result<i3
     Ok(max_ratio.ceil() as i32)
 }
 
-
 /// Helper function to peek at the file format using c path
 fn get_format_from_path<P: AsRef<Path>>(path: P) -> Result<bam::Format, Box<dyn std::error::Error>> {
     let path_str = path.as_ref().to_str().ok_or("Invalid UTF-8 path")?;
@@ -119,8 +119,8 @@ fn formats_equal(a: &bam::Format, b: &bam::Format) -> bool {
     }
 }
 
+//main logic 
 pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-
     //detect format of both input files (i.e sam/cram/bam)
     let asm1_format = get_format_from_path(&args.asm1)
         .map_err(|e| format!("Failed to identify asm1 file format: {}", e))?;
@@ -138,68 +138,121 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut asm2_reader = bam::Reader::from_path(&args.asm2)
         .map_err(|e| format!("Failed to open asm2 file '{}': {}", args.asm2, e))?;
 
-    //Store headers from both input files, as these headers are the same as will be needed in output files
-    let header_asm1 = bam::Header::from_template(asm1_reader.header());
-    let header_asm2 = bam::Header::from_template(asm2_reader.header());
+    //owned header views from both inputs (used for tid to name mapping and merged-header construction)
+    let asm1_hdr = asm1_reader.header().to_owned();
+    let asm2_hdr = asm2_reader.header().to_owned();
+
+    //pre-compute target name slices once
+    let asm1_names = asm1_hdr.target_names();
+    let asm2_names = asm2_hdr.target_names();
+
+    //number of @SQ entries in asm1; in a merged header asm2's contigs are appended after these,
+    let n1 = asm1_hdr.target_count() as i32;
+    //offset applied to asm2 reference ids when writing (n1 in merge mode, 0 in partitioned mode)
+    let asm2_offset = if args.merge { n1 } else { 0 };
 
     //get proper file extension for output based on input format
+    //previos checked that fommats were the same between files
     let extension = match asm1_format {
         bam::Format::Bam => ".bam",
         bam::Format::Sam => ".sam",
         bam::Format::Cram => ".cram",
     };
 
+    //--merge mode validation
+    if args.merge {
+        //--both would put two primary records for one read in a single file, throw error
+        if args.both {
+            return Err("--both cannot be combined with --merge (a read would get two primary records in one file)".into());
+        }
+        //the merged header concatenates the @SQ lists, so contig names must be different between assemblies
+        let names1: HashSet<&[u8]> = asm1_names.iter().copied().collect();
+        if let Some(dup) = asm2_names.iter().find(|n| names1.contains(*n)) {
+            return Err(format!(
+                "--merge requires unique contig names between the two inputs, but '{}' appears in both",
+                String::from_utf8_lossy(dup)
+            ).into());
+        }
+        //a single CRAM writer needs one combined reference covering all contigs of both haplotypes
+        if let bam::Format::Cram = asm1_format {
+            if args.ref_merged.is_none() {
+                return Err("Merged CRAM output requires a combined reference FASTA containing all contigs of both inputs. Use --ref-merged <FILE>".into());
+            }
+        }
+    } else if args.ref_merged.is_some() {
+        eprintln!("Warning: --ref-merged is ignored without --merge");
+    }
 
-    //create writers for both outputs that share user specified prefix
-    let asm1_out_path = format!("hiphap_{}{}", args.s1, extension);
-    let asm2_out_path = format!("hiphap_{}{}", args.s2, extension);
+    //make command line for the @PG tag space seperated
+    let hiphap_cl: String = std::env::args()
+        .map(|a| a.replace(['\t', '\n'], " "))
+        .collect::<Vec<_>>()
+        .join(" ");
 
-    //headers are same as in original files, so copy them into output
-    let mut out_asm1 = Writer::from_path(&asm1_out_path, &header_asm1, asm1_format)
-        .map_err(|e| format!("Failed to create output file '{}': {}", asm1_out_path, e))?;
-    let mut out_asm2 = Writer::from_path(&asm2_out_path, &header_asm2, asm2_format)
-        .map_err(|e| format!("Failed to create output file '{}': {}", asm2_out_path, e))?;
+    //create output writers
+    let (mut out_asm1, mut out_asm2): (Writer, Option<Writer>) = if args.merge {
+        //in merge mode, out_asm1 is the single merged writer and out_asm2 is None;
+        let merged_header = build_merged_header(&asm1_hdr, &asm2_hdr, &hiphap_cl);
+        let merged_path = format!("hiphap_{}_{}_merged{}", args.s1, args.s2, extension);
+        let w = Writer::from_path(&merged_path, &merged_header, asm1_format)
+            .map_err(|e| format!("Failed to create output file '{}': {}", merged_path, e))?;
+        (w, None)
+    } else {
+        //in partitioned mode, out_asm1/out_asm2 are the per-haplotype writers, copy input headers
+        let header_asm1 = header_with_pg(&asm1_hdr, &hiphap_cl);
+        let header_asm2 = header_with_pg(&asm2_hdr, &hiphap_cl);
+        let asm1_out_path = format!("hiphap_{}{}", args.s1, extension);
+        let asm2_out_path = format!("hiphap_{}{}", args.s2, extension);
+        let w1 = Writer::from_path(&asm1_out_path, &header_asm1, asm1_format)
+            .map_err(|e| format!("Failed to create output file '{}': {}", asm1_out_path, e))?;
+        let w2 = Writer::from_path(&asm2_out_path, &header_asm2, asm2_format)
+            .map_err(|e| format!("Failed to create output file '{}': {}", asm2_out_path, e))?;
+        (w1, Some(w2))
+    };
 
-    //if dealing with a cram file, must set reference fastas and ensure the user provided these
+    // set cram reference for readers and writers if cram input 
     if let bam::Format::Cram = asm1_format {
-        //set fasta reference for both asm1 reader and writer
-        if let Some(reference) = &args.ref1 {
-            asm1_reader.set_reference(reference)
-                .map_err(|e| format!("Failed to set reference for asm1 Reader: {}", e))?;
-            out_asm1.set_reference(reference)
+        //set readers
+        let r1 = args.ref1.as_deref()
+            .ok_or("Input format is CRAM, but no reference FASTA for asm1 provided. Use --ref1 <FILE>")?;
+        asm1_reader.set_reference(r1)
+            .map_err(|e| format!("Failed to set reference for asm1 Reader: {}", e))?;
+        let r2 = args.ref2.as_deref()
+            .ok_or("Input format is CRAM, but no reference FASTA for asm2 provided. Use --ref2 <FILE>")?;
+        asm2_reader.set_reference(r2)
+            .map_err(|e| format!("Failed to set reference for asm2 Reader: {}", e))?;
+
+        //set to diploid reference writer if --merge setting 
+        if args.merge {
+            let rm = args.ref_merged.as_deref().unwrap();
+            out_asm1.set_reference(rm)
+                .map_err(|e| format!("Failed to set reference for merged Writer: {}", e))?;
+        //else set each partitioned file to respectinve reference fasta of input
+        } else {
+            out_asm1.set_reference(r1)
                 .map_err(|e| format!("Failed to set reference for asm1 Writer: {}", e))?;
-        } else {
-            //throw error reference fasta was not provided on a cram input
-            return Err("Input format is CRAM, but no reference FASTA for asm1 provided. Use --ref1 <FILE>".into());
-        }
-    } else if args.ref1.is_some() {
-        //warn user that asm1 reference will be ignored since the input isn't cram
-        eprintln!("Warning: --ref1 is ignored for non-CRAM input");
-    }
-
-    //repeat above for the asm2 cram file
-    if let bam::Format::Cram = asm2_format {
-        if let Some(reference) = &args.ref2 {
-            asm2_reader.set_reference(reference)
-                .map_err(|e| format!("Failed to set reference for asm2 Reader: {}", e))?;
-            out_asm2.set_reference(reference)
+            out_asm2.as_mut().unwrap().set_reference(r2)
                 .map_err(|e| format!("Failed to set reference for asm2 Writer: {}", e))?;
-        } else {
-            return Err("Input format is CRAM, but no reference FASTA for asm2 provided. Use --ref2 <FILE>".into());
         }
-    } else if args.ref2.is_some() {
-        eprintln!("Warning: --ref2 is ignored for non-CRAM input");
+    } else {
+        if args.ref1.is_some() { eprintln!("Warning: --ref1 is ignored for non-CRAM input"); }
+        if args.ref2.is_some() { eprintln!("Warning: --ref2 is ignored for non-CRAM input"); }
     }
 
-    //resolve match score: user override takes precedence, else auto-estimate from both BAMs
-    let resolved_match_sc: f32 = match args.match_sc {
-        Some(v) => v,
-        None => {
-            let a1 = estimate_minimap2_a(&args.asm1, args.ref1.as_deref())?;
-            let a2 = estimate_minimap2_a(&args.asm2, args.ref2.as_deref())?;
-            let est = a1.max(a2);
-            eprintln!("Auto-estimated minimap2 -A (--match-score) from files: asm1={}, asm2={}, using={}", a1, a2, est);
-            est as f32
+    //autoestimate match score (-A in minimap2) from MS tag 
+    let resolved_match_sc: f32 = if args.no_hapq {
+        // skip under --no-hapq 
+        args.match_sc.unwrap_or(0.0)
+    } else {
+        match args.match_sc {
+            Some(v) => v,
+            None => {
+                let a1 = estimate_minimap2_a(&args.asm1, args.ref1.as_deref())?;
+                let a2 = estimate_minimap2_a(&args.asm2, args.ref2.as_deref())?;
+                let est = a1.max(a2);
+                eprintln!("Auto-estimated minimap2 -A (--match-score) from files: asm1={}, asm2={}, using={}", a1, a2, est);
+                est as f32
+            }
         }
     };
 
@@ -211,14 +264,6 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         Some(BufWriter::new(File::create(&span_path)
             .map_err(|e| format!("Failed to create '{}': {}", span_path, e))?))
     };
-
-    //owned header views for tid to contig name mapping, borrowed in writer
-    let asm1_hdr = asm1_reader.header().to_owned();
-    let asm2_hdr = asm2_reader.header().to_owned();
-
-    //pre-compute target name slices once 
-    let asm1_names = asm1_hdr.target_names();
-    let asm2_names = asm2_hdr.target_names();
 
     //set threads
     //if user specifies less than 4, set to 4 (1 thread for each reader and each writer is needed)
@@ -232,8 +277,13 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     //assign threads to each reader/writer pair
     asm1_reader.set_threads(r)?;
     asm2_reader.set_threads(r)?;
-    out_asm1.set_threads(w)?;
-    out_asm2.set_threads(w)?;
+    if let Some(out2) = out_asm2.as_mut() {
+        out_asm1.set_threads(w)?;
+        out2.set_threads(w)?;
+    } else {
+        //single merged writer gets the full writer thread budget
+        out_asm1.set_threads(2 * w)?;
+    }
 
     //create peakable iterators of each file
     let mut asm1_iter = asm1_reader.records().peekable();
@@ -281,152 +331,53 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         //get cluster with the higher alignment score, returns the Winner enum and HAPQ
         let (winner, hapq) = compare_clusters(&mut cluster_asm1, &mut cluster_asm2, &args, resolved_match_sc)?;
 
-        //logic for which file to write read to given score comparison output
+        //logic for which file to write read to given weighted AS comparison output
         match winner {
-            //asm1 clear winner, write to out_asm1
+            //asm1 clear winner, write to the asm1 output
             crate::Winner::Asm1 => {
-                count_asm1 += 1; // increment read counter
-                let mut seen_tids: Vec<i32> = Vec::with_capacity(4);
-                let mut primary_idx: Option<usize> = None;
-                for (i, rec) in cluster_asm1.iter_mut().enumerate() {
-                    if span_writer.is_some() && !rec.is_secondary() && !rec.is_unmapped() {
-                        let t = rec.tid();
-                        if !seen_tids.contains(&t) { seen_tids.push(t); }
-                        if !rec.is_supplementary() { primary_idx = Some(i); }
-                    }
-                    if let Some(hq) = hapq { rec.push_aux(b"hq", Aux::U8(hq))?; }
-                    out_asm1.write(rec)?;
-                }
-                if seen_tids.len() > 1 {
-                    if let Some(idx) = primary_idx {
-                        let rec = &cluster_asm1[idx];
-                        let (seq, qual) = oriented_seq_qual(rec);
-                        emit_span_fastq(&mut span_writer, rec.qname(), &seq, &qual, &seen_tids, &asm1_names, "asm1")?;
-                    }
-                }
+                count_asm1 += 1;
+                write_winner_cluster(&mut out_asm1, &mut cluster_asm1, hapq, 0, &mut span_writer, &asm1_names, "asm1")?;
             }
-            //asm2 clear winner, write to out_asm2
+            //asm2 clear winner, write to the asm2 output (or merged writer with offset)
             crate::Winner::Asm2 => {
-                count_asm2 += 1; // increment read counter
-                let mut seen_tids: Vec<i32> = Vec::with_capacity(4);
-                let mut primary_idx: Option<usize> = None;
-                for (i, rec) in cluster_asm2.iter_mut().enumerate() {
-                    if span_writer.is_some() && !rec.is_secondary() && !rec.is_unmapped() {
-                        let t = rec.tid();
-                        if !seen_tids.contains(&t) { seen_tids.push(t); }
-                        if !rec.is_supplementary() { primary_idx = Some(i); }
-                    }
-                    if let Some(hq) = hapq { rec.push_aux(b"hq", Aux::U8(hq))?; }
-                    out_asm2.write(rec)?;
-                }
-                if seen_tids.len() > 1 {
-                    if let Some(idx) = primary_idx {
-                        let rec = &cluster_asm2[idx];
-                        let (seq, qual) = oriented_seq_qual(rec);
-                        emit_span_fastq(&mut span_writer, rec.qname(), &seq, &qual, &seen_tids, &asm2_names, "asm2")?;
-                    }
-                }
+                count_asm2 += 1; 
+                 //in merge mode out_asm2 is None: asm2 records go to out_asm1 (the merged writer)
+                let w2: &mut Writer = match out_asm2 { Some(ref mut w) => w, None => &mut out_asm1 };
+                write_winner_cluster(w2, &mut cluster_asm2, hapq, asm2_offset, &mut span_writer, &asm2_names, "asm2")?;
             }
             crate::Winner::Both => {
-                count_equal += 1; // increment read counter
-                //if user specifices --both, write equal scoring reads to output files
+                count_equal += 1;
+                //if user specifies --both, write equal scoring reads to both output files
+                //(--both is rejected together with --merge)
                 if args.both {
-                    let mut seen_tids1: Vec<i32> = Vec::with_capacity(4);
-                    let mut primary_idx1: Option<usize> = None;
-                    for (i, rec) in cluster_asm1.iter_mut().enumerate() {
-                        if span_writer.is_some() && !rec.is_secondary() && !rec.is_unmapped() {
-                            let t = rec.tid();
-                            if !seen_tids1.contains(&t) { seen_tids1.push(t); }
-                            if !rec.is_supplementary() { primary_idx1 = Some(i); }
-                        }
-                        if let Some(hq) = hapq { rec.push_aux(b"hq", Aux::U8(hq))?; }
-                        out_asm1.write(rec)?;
-                    }
-                    if seen_tids1.len() > 1 {
-                        if let Some(idx) = primary_idx1 {
-                            let rec = &cluster_asm1[idx];
-                            let (seq, qual) = oriented_seq_qual(rec);
-                            emit_span_fastq(&mut span_writer, rec.qname(), &seq, &qual, &seen_tids1, &asm1_names, "asm1")?;
-                        }
-                    }
-                    let mut seen_tids2: Vec<i32> = Vec::with_capacity(4);
-                    let mut primary_idx2: Option<usize> = None;
-                    for (i, rec) in cluster_asm2.iter_mut().enumerate() {
-                        if span_writer.is_some() && !rec.is_secondary() && !rec.is_unmapped() {
-                            let t = rec.tid();
-                            if !seen_tids2.contains(&t) { seen_tids2.push(t); }
-                            if !rec.is_supplementary() { primary_idx2 = Some(i); }
-                        }
-                        if let Some(hq) = hapq { rec.push_aux(b"hq", Aux::U8(hq))?; }
-                        out_asm2.write(rec)?;
-                    }
-                    if seen_tids2.len() > 1 {
-                        if let Some(idx) = primary_idx2 {
-                            let rec = &cluster_asm2[idx];
-                            let (seq, qual) = oriented_seq_qual(rec);
-                            emit_span_fastq(&mut span_writer, rec.qname(), &seq, &qual, &seen_tids2, &asm2_names, "asm2")?;
-                        }
-                    }
-                //default behavior is randomly assign equal scoring read to one file
+                    write_winner_cluster(&mut out_asm1, &mut cluster_asm1, hapq, 0, &mut span_writer, &asm1_names, "asm1")?;
+                    let w2 = out_asm2.as_mut().expect("internal error: --both requires partitioned mode");
+                    write_winner_cluster(w2, &mut cluster_asm2, hapq, 0, &mut span_writer, &asm2_names, "asm2")?;
+                //default behavior is to deterministically randomly assign each tied read to one haplotype
                 } else {
                     //hash read name and use last bit value to assign to asm1 or asm2
                     //ensures that assignments will be reproducible
                     match crate::choose_random(cluster_asm1[0].qname()) {
                         crate::Winner::Asm1 => {
-                            let mut seen_tids: Vec<i32> = Vec::with_capacity(4);
-                            let mut primary_idx: Option<usize> = None;
-                            for (i, rec) in cluster_asm1.iter_mut().enumerate() {
-                                if span_writer.is_some() && !rec.is_secondary() && !rec.is_unmapped() {
-                                    let t = rec.tid();
-                                    if !seen_tids.contains(&t) { seen_tids.push(t); }
-                                    if !rec.is_supplementary() { primary_idx = Some(i); }
-                                }
-                                if let Some(hq) = hapq { rec.push_aux(b"hq", Aux::U8(hq))?; }
-                                out_asm1.write(rec)?;
-                            }
-                            if seen_tids.len() > 1 {
-                                if let Some(idx) = primary_idx {
-                                    let rec = &cluster_asm1[idx];
-                                    let (seq, qual) = oriented_seq_qual(rec);
-                                    emit_span_fastq(&mut span_writer, rec.qname(), &seq, &qual, &seen_tids, &asm1_names, "asm1")?;
-                                }
-                            }
+                            write_winner_cluster(&mut out_asm1, &mut cluster_asm1, hapq, 0, &mut span_writer, &asm1_names, "asm1")?;
                         }
                         _ => {
-                            let mut seen_tids: Vec<i32> = Vec::with_capacity(4);
-                            let mut primary_idx: Option<usize> = None;
-                            for (i, rec) in cluster_asm2.iter_mut().enumerate() {
-                                if span_writer.is_some() && !rec.is_secondary() && !rec.is_unmapped() {
-                                    let t = rec.tid();
-                                    if !seen_tids.contains(&t) { seen_tids.push(t); }
-                                    if !rec.is_supplementary() { primary_idx = Some(i); }
-                                }
-                                if let Some(hq) = hapq { rec.push_aux(b"hq", Aux::U8(hq))?; }
-                                out_asm2.write(rec)?;
-                            }
-                            if seen_tids.len() > 1 {
-                                if let Some(idx) = primary_idx {
-                                    let rec = &cluster_asm2[idx];
-                                    let (seq, qual) = oriented_seq_qual(rec);
-                                    emit_span_fastq(&mut span_writer, rec.qname(), &seq, &qual, &seen_tids, &asm2_names, "asm2")?;
-                                }
-                            }
+                            let w2: &mut Writer = match out_asm2 { Some(ref mut w) => w, None => &mut out_asm1 };
+                            write_winner_cluster(w2, &mut cluster_asm2, hapq, asm2_offset, &mut span_writer, &asm2_names, "asm2")?;
                         }
                     }
                 }
             }
             crate::Winner::Unmapped => {
                 count_unmapped += 1;
+                //hapq is None for unmapped reads, so no hq tag is added and no span record is emitted
                 match args.unmapped {
                     crate::cli::UnmappedDest::Asm1 => {
-                        for rec in cluster_asm1.iter_mut() {
-                            out_asm1.write(rec)?;
-                        }
+                        write_winner_cluster(&mut out_asm1, &mut cluster_asm1, hapq, 0, &mut span_writer, &asm1_names, "asm1")?;
                     }
                     crate::cli::UnmappedDest::Asm2 => {
-                        for rec in cluster_asm2.iter_mut() {
-                            out_asm2.write(rec)?;
-                        }
+                        let w2: &mut Writer = match out_asm2 { Some(ref mut w) => w, None => &mut out_asm1 };
+                        write_winner_cluster(w2, &mut cluster_asm2, hapq, asm2_offset, &mut span_writer, &asm2_names, "asm2")?;
                     }
                     crate::cli::UnmappedDest::Discard => {}
                 }
@@ -441,10 +392,12 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     //print summarry statistics to terminal
     let total = count_asm1 + count_asm2 + count_equal + count_unmapped;
-    eprintln!("Reads aligned better to {}: {} ({:.1}%)", args.s1, count_asm1, count_asm1 as f64 / total as f64 * 100.0);
-    eprintln!("Reads aligned better to {}: {} ({:.1}%)", args.s2, count_asm2, count_asm2 as f64 / total as f64 * 100.0);
-    eprintln!("Reads with equal scores:     {} ({:.1}%)", count_equal, count_equal as f64 / total as f64 * 100.0);
-    eprintln!("Reads unmapped to both:      {} ({:.1}%)", count_unmapped, count_unmapped as f64 / total as f64 * 100.0);
+    //avoid NaN% when no reads were parsed (e.g. empty inputs)
+    let pct = |n: u64| if total == 0 { 0.0 } else { n as f64 / total as f64 * 100.0 };
+    eprintln!("Reads aligned better to {}: {} ({:.1}%)", args.s1, count_asm1, pct(count_asm1));
+    eprintln!("Reads aligned better to {}: {} ({:.1}%)", args.s2, count_asm2, pct(count_asm2));
+    eprintln!("Reads with equal scores:     {} ({:.1}%)", count_equal, pct(count_equal));
+    eprintln!("Reads unmapped to both:      {} ({:.1}%)", count_unmapped, pct(count_unmapped));
     eprintln!("Total reads parsed:                 {}", total);
 Ok(())
 }
@@ -556,7 +509,7 @@ fn get_weighted_score(cur_clust : &mut Vec<Record>, tag: &[u8]) -> Result<(f32, 
         read_intervals.push((read_start, read_start + alen))
     }
     //this should not happen, but handle just in case
-    if sum_alignment_lens <= 0 {
+    if sum_alignment_lens == 0 {
         return Err(format!("Read '{}' has primary alignment length of 0", qname).into());
     }
 
@@ -705,16 +658,10 @@ fn oriented_seq_qual(rec: &Record) -> (Vec<u8>, Vec<u8>) {
     (seq, qual)
 }
 
-//claude code assisted  
+
 //write one FASTQ record for a read whose winning cluster spans multiple chromosomes:
-fn emit_span_fastq(
-    w: &mut Option<BufWriter<File>>,
-    qname: &[u8],
-    seq: &[u8],
-    qual: &[u8],
-    tids: &[i32],
-    names: &[&[u8]],
-    label: &str,
+//claude code assisted  (checked )
+fn emit_span_fastq( w: &mut Option<BufWriter<File>>, qname: &[u8], seq: &[u8], qual: &[u8], tids: &[i32], names: &[&[u8]],label: &str,
 ) -> std::io::Result<()> {
     if let Some(file) = w {
         let q = std::str::from_utf8(qname).unwrap_or("?");
@@ -751,6 +698,206 @@ fn emit_span_fastq(
             file.write_all(&ascii)?;
         }
         writeln!(file)?;
+    }
+    Ok(())
+}
+
+//collect every @PG ID declared in SAM header bytes `text`.
+//claude assisted (checked)
+fn collect_pg_ids(text: &[u8]) -> HashSet<Vec<u8>> {
+    let mut ids = HashSet::new();
+    for line in text.split(|&b| b == b'\n') {
+        if !line.starts_with(b"@PG\t") { continue; }
+        for field in line.split(|&b| b == b'\t') {
+            if let Some(v) = field.strip_prefix(b"ID:".as_slice()) {
+                ids.insert(v.to_vec());
+            }
+        }
+    }
+    ids
+}
+
+//leaf of the @PG chain in `text`: the most recently declared ID that no @PG references via PP,
+//so a freshly added program links onto the end of the chain. None when `text` has no @PG lines.
+//claude assisted (checked)
+fn pg_chain_leaf(text: &[u8]) -> Option<Vec<u8>> {
+    let mut id_order: Vec<Vec<u8>> = Vec::new();
+    let mut referenced: HashSet<Vec<u8>> = HashSet::new();
+    for line in text.split(|&b| b == b'\n') {
+        if !line.starts_with(b"@PG\t") { continue; }
+        for field in line.split(|&b| b == b'\t') {
+            if let Some(v) = field.strip_prefix(b"ID:".as_slice()) {
+                if !id_order.iter().any(|x| x == v) { id_order.push(v.to_vec()); }
+            } else if let Some(v) = field.strip_prefix(b"PP:".as_slice()) {
+                referenced.insert(v.to_vec());
+            }
+        }
+    }
+    id_order.into_iter().rev().find(|i| !referenced.contains(i))
+}
+
+//append asm2's @PG lines to `text`, renaming any IDs that collide with IDs already present
+//(asm1's) and rewriting asm2-internal PP references to the renamed IDs. 
+//claude assisted (checked)
+fn append_asm2_pg(text: &mut Vec<u8>, asm2_hdr: &bam::HeaderView) {
+    if text.last().map_or(false, |&b| b != b'\n') {
+        text.push(b'\n');
+    }
+    let asm2_bytes = asm2_hdr.as_bytes();
+    let mut used = collect_pg_ids(text);
+
+    //first pass: map each colliding asm2 ID to a fresh "<id>-N" name (keeps non-colliding IDs)
+    let mut rename: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+    for line in asm2_bytes.split(|&b| b == b'\n') {
+        if !line.starts_with(b"@PG\t") { continue; }
+        for field in line.split(|&b| b == b'\t') {
+            if let Some(v) = field.strip_prefix(b"ID:".as_slice()) {
+                let old = v.to_vec();
+                if used.contains(&old) {
+                    let mut k = 1;
+                    let mut newid = format!("{}-{}", String::from_utf8_lossy(&old), k).into_bytes();
+                    while used.contains(&newid) {
+                        k += 1;
+                        newid = format!("{}-{}", String::from_utf8_lossy(&old), k).into_bytes();
+                    }
+                    used.insert(newid.clone());
+                    rename.insert(old, newid);
+                } else {
+                    used.insert(old);
+                }
+            }
+        }
+    }
+
+    //second pass: emit each asm2 @PG line, applying the rename map to its ID and PP fields
+    for line in asm2_bytes.split(|&b| b == b'\n') {
+        if !line.starts_with(b"@PG\t") { continue; }
+        let mut first = true;
+        for field in line.split(|&b| b == b'\t') {
+            if !first { text.push(b'\t'); }
+            first = false;
+            if let Some(v) = field.strip_prefix(b"ID:".as_slice()) {
+                text.extend_from_slice(b"ID:");
+                text.extend_from_slice(rename.get(v).map_or(v, |n| n.as_slice()));
+            } else if let Some(v) = field.strip_prefix(b"PP:".as_slice()) {
+                text.extend_from_slice(b"PP:");
+                text.extend_from_slice(rename.get(v).map_or(v, |n| n.as_slice()));
+            } else {
+                text.extend_from_slice(field);
+            }
+        }
+        text.push(b'\n');
+    }
+}
+
+//append a @PG line recording this hiphap run to SAM header bytes `text`.
+//`pp` is the previous-program ID to chain onto 
+//claude assisted (checked)
+fn append_hiphap_pg(text: &mut Vec<u8>, cl: &str, pp: Option<&[u8]>) {
+    if text.last().map_or(false, |&b| b != b'\n') {
+        text.push(b'\n');
+    }
+    let ids = collect_pg_ids(text);
+    //unique ID: hiphap, else hiphap.1, hiphap.2, ...
+    let mut id = b"hiphap".to_vec();
+    let mut n = 1;
+    while ids.contains(&id) {
+        id = format!("hiphap.{}", n).into_bytes();
+        n += 1;
+    }
+    let mut pg = format!("@PG\tID:{}\tPN:HipHap\tVN:{}",
+        String::from_utf8_lossy(&id), env!("CARGO_PKG_VERSION"));
+    if let Some(pp) = pp {
+        pg.push_str(&format!("\tPP:{}", String::from_utf8_lossy(pp)));
+    }
+    pg.push_str(&format!("\tCL:{}\n", cl));
+    text.extend_from_slice(pg.as_bytes());
+}
+
+//round-trip a single input header through htslib, appending this run's hiphap @PG line.
+//claude assisted (checked)
+fn header_with_pg(hdr: &bam::HeaderView, cl: &str) -> bam::Header {
+    let mut text: Vec<u8> = hdr.as_bytes().to_vec();
+    let pp = pg_chain_leaf(&text);
+    append_hiphap_pg(&mut text, cl, pp.as_deref());
+    let view = bam::HeaderView::from_bytes(&text);
+    bam::Header::from_template(&view)
+}
+
+//build a merged output header from both inputs,
+//asm1 keeps tids 0..n1 and asm2's contigs are appended, taking tids n1..n1+n2
+//claude assisted (checked)
+fn build_merged_header(asm1_hdr: &bam::HeaderView, asm2_hdr: &bam::HeaderView, cl: &str) -> bam::Header {
+    let asm1_bytes = asm1_hdr.as_bytes();
+
+    //bucket asm1's header lines by type so we can re-emit them grouped instead of interleaved
+    let mut hd: Option<&[u8]> = None;
+    let mut sq_lines: Vec<&[u8]> = Vec::new();
+    let mut pg_lines: Vec<&[u8]> = Vec::new();
+    let mut other_lines: Vec<&[u8]> = Vec::new(); 
+    for line in asm1_bytes.split(|&b| b == b'\n') {
+        if line.is_empty() { continue; }
+        if line.starts_with(b"@HD") { hd = Some(line); }
+        else if line.starts_with(b"@SQ\t") { sq_lines.push(line); }
+        else if line.starts_with(b"@PG\t") { pg_lines.push(line); }
+        else { other_lines.push(line); }
+    }
+
+    let mut text: Vec<u8> = Vec::with_capacity(asm1_bytes.len() + asm2_hdr.as_bytes().len());
+    let push_line = |text: &mut Vec<u8>, line: &[u8]| { text.extend_from_slice(line); text.push(b'\n'); };
+
+    //@HD first if present
+    if let Some(h) = hd { push_line(&mut text, h); }
+    //all @SQ lines grouped: asm1's first (tids 0..n1), then asm2's (tids n1..) — order defines tids
+    for l in &sq_lines { push_line(&mut text, l); }
+    for line in asm2_hdr.as_bytes().split(|&b| b == b'\n') {
+        if line.starts_with(b"@SQ\t") { push_line(&mut text, line); }
+    }
+    //asm1's non-@HD/@SQ/@PG lines (@RG, @CO, ...) preserved, before the @PG block
+    for l in &other_lines { push_line(&mut text, l); }
+    //@PG block, grouped at the end: asm1's chain first
+    for l in &pg_lines { push_line(&mut text, l); }
+    //capture asm1's @PG leaf before adding asm2's chain, so the hiphap @PG links onto asm1's chain
+    let asm1_leaf = pg_chain_leaf(&text);
+    //carry over asm2's @PG provenance (renaming colliding IDs) so its minimap2 reference is recorded
+    append_asm2_pg(&mut text, asm2_hdr);
+    //record this hiphap run as a @PG line, linked onto asm1's existing @PG chain
+    append_hiphap_pg(&mut text, cl, asm1_leaf.as_deref());
+    //round-trip the assembled header text through htslib so all @SQ sub-fields are preserved
+    let view = bam::HeaderView::from_bytes(&text);
+    bam::Header::from_template(&view)
+}
+
+//write every record of a winning cluster to assigned file (merged or partitioned) 
+fn write_winner_cluster(writer: &mut Writer, cluster: &mut [Record],hapq: Option<u8>,tid_offset: i32,span_writer: &mut Option<BufWriter<File>>,names: &[&[u8]],label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut seen_tids: Vec<i32> = Vec::with_capacity(4);
+    let mut primary_idx: Option<usize> = None;
+    for (i, rec) in cluster.iter_mut().enumerate() {
+        //track distinct tids of the read's primary/supplementary alignments
+        if span_writer.is_some() && !rec.is_secondary() && !rec.is_unmapped() {
+            let t = rec.tid();
+            if !seen_tids.contains(&t) { seen_tids.push(t); }
+            if !rec.is_supplementary() { primary_idx = Some(i); }
+        }
+        //add hq tag to record 
+        if let Some(hq) = hapq { rec.push_aux(b"hq", Aux::U8(hq))?; }
+        //shift reference ids into the merged header tid coordinates
+        if tid_offset != 0 {
+            let t = rec.tid();
+            if t >= 0 { rec.set_tid(t + tid_offset); }
+            let mt = rec.mtid();
+            if mt >= 0 { rec.set_mtid(mt + tid_offset); }
+        }
+        writer.write(rec)?;
+    }
+    //if the read's winning alignments span more than one chromosome, write it to the span FASTQ
+    if seen_tids.len() > 1 {
+        if let Some(idx) = primary_idx {
+            let rec = &cluster[idx];
+            let (seq, qual) = oriented_seq_qual(rec);
+            emit_span_fastq(span_writer, rec.qname(), &seq, &qual, &seen_tids, names, label)?;
+        }
     }
     Ok(())
 }

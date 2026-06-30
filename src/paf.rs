@@ -10,7 +10,7 @@ use crate::cli::Cli;
 
 
 // estimate  the minimap2 `-A` (Match score) parameter from PAF .
-// Samples ~1 in 10,000 mapped reads until 10 reads are sampledd
+// Samples ~1 in 10,000 mapped reads until 20 reads are sampledd
 // and returns the ceiling of the maximum ms / alignment_length  value.
 //claude implemented (checked) 
 pub fn estimate_minimap2_a_paf(paf_path: &str) -> Result<i32, Box<dyn std::error::Error>> {
@@ -102,7 +102,30 @@ fn emit_span_paf(
 }
 
 
-//get chrom of alignment if mapped and non secondary 
+//write every record of a winning cluster to respective writer 
+fn write_paf_cluster(writer: &mut BufWriter<File>, cluster: &[String],hq_suffix: &str, span_writer: &mut Option<BufWriter<File>>, label: &str,) -> Result<(), Box<dyn std::error::Error>> {
+    let mut seen_chroms: Vec<String> = Vec::with_capacity(4);
+    for rec in cluster.iter() {
+
+        if span_writer.is_some() {
+            if let Some(tname) = paf_get_chrom(rec) {
+                if !seen_chroms.iter().any(|s| s == tname) {
+                    seen_chroms.push(tname.to_string());
+                }
+            }
+        }
+        //append hq tag
+        writeln!(writer, "{}{}", rec, hq_suffix)?;
+    }
+    //if winning read is to multiple chrs, write read to txt file 
+    if seen_chroms.len() > 1 {
+        let qname = cluster[0].split('\t').next().unwrap_or("");
+        emit_span_paf(span_writer, qname, &seen_chroms, label)?;
+    }
+    Ok(())
+}
+
+//get chrom of alignment if mapped and non secondary
 fn paf_get_chrom(rec: &str) -> Option<&str> {
     let mut tname: Option<&str> = None;
     for (i, f) in rec.split('\t').enumerate() {
@@ -124,15 +147,25 @@ fn paf_get_chrom(rec: &str) -> Option<&str> {
 
 pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
+    //--both would write a read's alignments to the merged file twice; reject the combination
+    if args.merge && args.both {
+        return Err("--both cannot be combined with --merge".into());
+    }
+
     //resolve match score: user override takes precedence, else auto-estimate from both PAFs
-    let resolved_match_sc: f32 = match args.match_sc {
-        Some(v) => v,
-        None => {
-            let a1 = estimate_minimap2_a_paf(&args.asm1)?;
-            let a2 = estimate_minimap2_a_paf(&args.asm2)?;
-            let est = a1.max(a2);
-            eprintln!("Auto-estimated minimap2 -A (--match-score) from PAFs: asm1={}, asm2={}, using={}", a1, a2, est);
-            est as f32
+    let resolved_match_sc: f32 = if args.no_hapq {
+        // HAPQ is skipped under --no-hapq, so the match score is unused; don't auto-estimate
+        args.match_sc.unwrap_or(0.0)
+    } else {
+        match args.match_sc {
+            Some(v) => v,
+            None => {
+                let a1 = estimate_minimap2_a_paf(&args.asm1)?;
+                let a2 = estimate_minimap2_a_paf(&args.asm2)?;
+                let est = a1.max(a2);
+                eprintln!("Auto-estimated minimap2 -A (--match-score) from PAFs: asm1={}, asm2={}, using={}", a1, a2, est);
+                est as f32
+            }
         }
     };
 
@@ -146,13 +179,21 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut asm1_iter = BufReader::new(file1).lines().peekable();
     let mut asm2_iter = BufReader::new(file2).lines().peekable();
 
-    //create writers for both outputs that share user specified prefix
-    let asm1_out_path = format!("hiphap_{}.paf", args.s1);
-    let asm2_out_path = format!("hiphap_{}.paf", args.s2);
+    //create output writer(s): a single merged file with --merge (out_asm2 = None), else one per haplotype.
+    let asm1_out_path = if args.merge {
+        format!("hiphap_{}_{}_merged.paf", args.s1, args.s2)
+    } else {
+        format!("hiphap_{}.paf", args.s1)
+    };
     let mut out_asm1 = BufWriter::new(File::create(&asm1_out_path)
         .map_err(|e| format!("Failed to create output file '{}': {}", asm1_out_path, e))?);
-    let mut out_asm2 = BufWriter::new(File::create(&asm2_out_path)
-        .map_err(|e| format!("Failed to create output file '{}': {}", asm2_out_path, e))?);
+    let mut out_asm2: Option<BufWriter<File>> = if args.merge {
+        None
+    } else {
+        let asm2_out_path = format!("hiphap_{}.paf", args.s2);
+        Some(BufWriter::new(File::create(&asm2_out_path)
+            .map_err(|e| format!("Failed to create output file '{}': {}", asm2_out_path, e))?))
+    };
 
     //open side writer for reads whose winning cluster spans multiple chromosomes (unless disabled)
     let span_path = format!("hiphap_{}_{}_span_chrom.txt", args.s1, args.s2);
@@ -204,136 +245,60 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         //get cluster with the higher alignment score, returns the Winner enum and HAPQ
         let (winner, hapq) = compare_clusters(&mut cluster_asm1, &mut cluster_asm2, args, resolved_match_sc)?;
 
-        //logic for which file to write read to given score comparison output
-        //helper: format hq tag suffix if hapq is present
+       
+        //format hq tag suffix if hapq mode is active
         let hq_suffix = match hapq {
             Some(hq) => format!("\thq:i:{}", hq),
             None => String::new(),
         };
 
+        //logic for which file to write read to given score comparison output
         match winner {
-            //asm1 clear winner, write to out_asm1
+            //asm1 clear winner, write to the asm1 output
             crate::Winner::Asm1 => {
                 count_asm1 += 1; // increment read counter
-                let mut seen_chroms: Vec<String> = Vec::with_capacity(4);
-                for rec in cluster_asm1.iter_mut() {
-                    if span_writer.is_some() {
-                        if let Some(tname) = paf_get_chrom(rec) {
-                            if !seen_chroms.iter().any(|s| s == tname) {
-                                seen_chroms.push(tname.to_string());
-                            }
-                        }
-                    }
-                    writeln!(out_asm1, "{}{}", rec, hq_suffix)?;
-                }
-                if seen_chroms.len() > 1 {
-                    let qname = cluster_asm1[0].split('\t').next().unwrap_or("");
-                    emit_span_paf(&mut span_writer, qname, &seen_chroms, "asm1")?;
-                }
+                write_paf_cluster(&mut out_asm1, &cluster_asm1, &hq_suffix, &mut span_writer, "asm1")?;
             }
-            //asm2 clear winner, write to out_asm2
+            //asm2 clear winner, write to the asm2 output (or merged writer)
             crate::Winner::Asm2 => {
                 count_asm2 += 1; // increment read counter
-                let mut seen_chroms: Vec<String> = Vec::with_capacity(4);
-                for rec in cluster_asm2.iter_mut() {
-                    if span_writer.is_some() {
-                        if let Some(tname) = paf_get_chrom(rec) {
-                            if !seen_chroms.iter().any(|s| s == tname) {
-                                seen_chroms.push(tname.to_string());
-                            }
-                        }
-                    }
-                    writeln!(out_asm2, "{}{}", rec, hq_suffix)?;
-                }
-                if seen_chroms.len() > 1 {
-                    let qname = cluster_asm2[0].split('\t').next().unwrap_or("");
-                    emit_span_paf(&mut span_writer, qname, &seen_chroms, "asm2")?;
-                }
+                let w2 = match out_asm2 { Some(ref mut w) => w, None => &mut out_asm1 };
+                write_paf_cluster(w2, &cluster_asm2, &hq_suffix, &mut span_writer, "asm2")?;
             }
             crate::Winner::Both => {
                 count_equal += 1; // increment read counter
                 //if user specifies --both, write equal scoring reads to both output files
+                //--both is rejected together with --merge
                 if args.both {
-                    let mut seen_chroms1: Vec<String> = Vec::with_capacity(4);
-                    for rec in cluster_asm1.iter_mut() {
-                        if span_writer.is_some() {
-                            if let Some(tname) = paf_get_chrom(rec) {
-                                if !seen_chroms1.iter().any(|s| s == tname) {
-                                    seen_chroms1.push(tname.to_string());
-                                }
-                            }
-                        }
-                        writeln!(out_asm1, "{}{}", rec, hq_suffix)?;
-                    }
-                    if seen_chroms1.len() > 1 {
-                        let qname = cluster_asm1[0].split('\t').next().unwrap_or("");
-                        emit_span_paf(&mut span_writer, qname, &seen_chroms1, "asm1")?;
-                    }
-                    let mut seen_chroms2: Vec<String> = Vec::with_capacity(4);
-                    for rec in cluster_asm2.iter_mut() {
-                        if span_writer.is_some() {
-                            if let Some(tname) = paf_get_chrom(rec) {
-                                if !seen_chroms2.iter().any(|s| s == tname) {
-                                    seen_chroms2.push(tname.to_string());
-                                }
-                            }
-                        }
-                        writeln!(out_asm2, "{}{}", rec, hq_suffix)?;
-                    }
-                    if seen_chroms2.len() > 1 {
-                        let qname = cluster_asm2[0].split('\t').next().unwrap_or("");
-                        emit_span_paf(&mut span_writer, qname, &seen_chroms2, "asm2")?;
-                    }
-                //default behavior is randomly assign equal scoring read to one file
+                    write_paf_cluster(&mut out_asm1, &cluster_asm1, &hq_suffix, &mut span_writer, "asm1")?;
+                    let w2 = out_asm2.as_mut().expect("internal error: --both requires partitioned mode");
+                    write_paf_cluster(w2, &cluster_asm2, &hq_suffix, &mut span_writer, "asm2")?;
+                //default behavior is to deterministically assign each tied read to one haplotype
                 } else {
                     //hash read name and use last bit value to assign to asm1 or asm2
                     //ensures that assignments will be reproducible
-                    //own the qname so we can use it after the mutable iteration loops below
                     let qname = cluster_asm1[0].split('\t').next().unwrap().to_string();
                     match crate::choose_random(qname.as_bytes()) {
                         crate::Winner::Asm1 => {
-                            let mut seen_chroms: Vec<String> = Vec::with_capacity(4);
-                            for rec in cluster_asm1.iter_mut() {
-                                if span_writer.is_some() {
-                                    if let Some(tname) = paf_get_chrom(rec) {
-                                        if !seen_chroms.iter().any(|s| s == tname) {
-                                            seen_chroms.push(tname.to_string());
-                                        }
-                                    }
-                                }
-                                writeln!(out_asm1, "{}{}", rec, hq_suffix)?;
-                            }
-                            if seen_chroms.len() > 1 {
-                                emit_span_paf(&mut span_writer, &qname, &seen_chroms, "asm1")?;
-                            }
+                            write_paf_cluster(&mut out_asm1, &cluster_asm1, &hq_suffix, &mut span_writer, "asm1")?;
                         }
                         _ => {
-                            let mut seen_chroms: Vec<String> = Vec::with_capacity(4);
-                            for rec in cluster_asm2.iter_mut() {
-                                if span_writer.is_some() {
-                                    if let Some(tname) = paf_get_chrom(rec) {
-                                        if !seen_chroms.iter().any(|s| s == tname) {
-                                            seen_chroms.push(tname.to_string());
-                                        }
-                                    }
-                                }
-                                writeln!(out_asm2, "{}{}", rec, hq_suffix)?;
-                            }
-                            if seen_chroms.len() > 1 {
-                                emit_span_paf(&mut span_writer, &qname, &seen_chroms, "asm2")?;
-                            }
+                            let w2 = match out_asm2 { Some(ref mut w) => w, None => &mut out_asm1 };
+                            write_paf_cluster(w2, &cluster_asm2, &hq_suffix, &mut span_writer, "asm2")?;
                         }
                     }
                 }
             }
             crate::Winner::Unmapped => {
                 count_unmapped += 1;
+                //--unmapped selects which input's records to emit (hapq is None, so no hq tag, no span)
                 match args.unmapped {
                     crate::cli::UnmappedDest::Asm1 => {
-                        for rec in cluster_asm1.iter_mut() { writeln!(out_asm1, "{}{}", rec, hq_suffix)?; }
+                        write_paf_cluster(&mut out_asm1, &cluster_asm1, &hq_suffix, &mut span_writer, "asm1")?;
                     }
                     crate::cli::UnmappedDest::Asm2 => {
-                        for rec in cluster_asm2.iter_mut() { writeln!(out_asm2, "{}{}", rec, hq_suffix)?; }
+                        let w2 = match out_asm2 { Some(ref mut w) => w, None => &mut out_asm1 };
+                        write_paf_cluster(w2, &cluster_asm2, &hq_suffix, &mut span_writer, "asm2")?;
                     }
                     crate::cli::UnmappedDest::Discard => {}
                 }
@@ -341,19 +306,23 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
 
     }
-    //flush all writers 
+    //flush all writers
     out_asm1.flush().map_err(|e| format!("Failed to flush '{}': {}", asm1_out_path, e))?;
-    out_asm2.flush().map_err(|e| format!("Failed to flush '{}': {}", asm2_out_path, e))?;
+    if let Some(w) = out_asm2.as_mut() {
+        w.flush().map_err(|e| format!("Failed to flush output: {}", e))?;
+    }
     if let Some(w) = span_writer.as_mut() {
         w.flush().map_err(|e| format!("Failed to flush '{}': {}", span_path, e))?;
     }
 
     //print summary statistics to terminal
     let total = count_asm1 + count_asm2 + count_equal + count_unmapped;
-    eprintln!("Reads aligned better to {}: {} ({:.1}%)", args.s1, count_asm1, count_asm1 as f64 / total as f64 * 100.0);
-    eprintln!("Reads aligned better to {}: {} ({:.1}%)", args.s2, count_asm2, count_asm2 as f64 / total as f64 * 100.0);
-    eprintln!("Reads with equal scores:     {} ({:.1}%)", count_equal, count_equal as f64 / total as f64 * 100.0);
-    eprintln!("Reads unmapped to both:      {} ({:.1}%)", count_unmapped, count_unmapped as f64 / total as f64 * 100.0);
+    //avoid NaN% when no reads were parsed (e.g. empty inputs)
+    let pct = |n: u64| if total == 0 { 0.0 } else { n as f64 / total as f64 * 100.0 };
+    eprintln!("Reads aligned better to {}: {} ({:.1}%)", args.s1, count_asm1, pct(count_asm1));
+    eprintln!("Reads aligned better to {}: {} ({:.1}%)", args.s2, count_asm2, pct(count_asm2));
+    eprintln!("Reads with equal scores:     {} ({:.1}%)", count_equal, pct(count_equal));
+    eprintln!("Reads unmapped to both:      {} ({:.1}%)", count_unmapped, pct(count_unmapped));
     eprintln!("Total reads parsed:          {}", total);
     Ok(())
 }
@@ -472,7 +441,7 @@ pub fn get_weighted_score(cur_clust : &Vec<String>, tag_prefix: &str) -> Result<
 
     }
 
-    if sum_alignment_lens <= 0 {
+    if sum_alignment_lens == 0 {
         return Err(format!("Read '{}' has primary alignment length of 0",
             cur_clust[0].split('\t').next().unwrap_or("unknown")).into());
     }

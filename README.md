@@ -33,20 +33,22 @@ Arguments:
   <ASM2>  asm2 alignment file (sam/bam/cram/paf)
 
 Options:
-  -1, --s1 <NAME>         label for asm1 sample (used in output file names and summary) [default: asm1]
-  -2, --s2 <NAME>         label for asm2 sample (used in output file names and summary) [default: asm2]
-      --paf               input files are PAF
-      --ms                use ms:i: tag rather than AS:i: for alignment score
-  -b, --both              write reads with equal alignment scores to both output files
-  -u, --unmapped <DEST>   where to write reads unmapped in both assemblies: asm1, asm2, or discard [default: asm1] [possible values: asm1, asm2, discard]
-      --ref1 <FILE>       reference FASTA for cram file (asm1)
-      --ref2 <FILE>       reference FASTA for cram file (asm2)
-  -A, --match-sc <FLOAT>  per-base match score from aligner scoring scheme (auto-estimated from ms:i tags if omitted)
-      --no-hapq           skip HAPQ score calculation and hq tag output (e.g. for comparing GRCh38 vs CHM13)
-      --no-span-chrom     disable writing hiphap_{s1}_{s2}_span_chrom.fastq
-  -t, --threads <INT>     Total thread pool size (min 4). Multiples of 8 recommended for optimal read/write balance. [default: 8]
-  -h, --help              Print help
-  -V, --version           Print version
+  -1, --s1 <NAME>          label for asm1 sample (used in output file names and summary) [default: asm1]
+  -2, --s2 <NAME>          label for asm2 sample (used in output file names and summary) [default: asm2]
+      --paf                input files are PAF
+      --ms                 use ms:i: tag rather than AS:i: for alignment score
+  -b, --both               write reads with equal alignment scores to both output files
+  -m, --merge              write a single merged output file (hiphap_{s1}_{s2}_merged.*) instead of one file per haplotype
+      --ref-merged <FILE>  combined reference FASTA for merged CRAM output (must contain all contigs of both inputs); required with --merge on CRAM input
+  -u, --unmapped <DEST>    where to write reads unmapped in both assemblies: asm1, asm2, or discard [default: asm1] [possible values: asm1, asm2, discard]
+      --ref1 <FILE>        reference FASTA for cram file (asm1)
+      --ref2 <FILE>        reference FASTA for cram file (asm2)
+  -A, --match-sc <FLOAT>   per-base match score from aligner scoring scheme (auto-estimated from ms:i tags if omitted)
+      --no-hapq            skip HAPQ score calculation and hq tag output (e.g. for comparing GRCh38 vs CHM13)
+      --no-span-chrom      disable writing hiphap_{s1}_{s2}_span_chrom.fastq
+  -t, --threads <INT>      Total thread pool size (min 4). Multiples of 8 recommended for optimal read/write balance. [default: 8]
+  -h, --help               Print help
+  -V, --version            Print version
 ```
 
 Each output record is annotated with an `hq:i:` tag carrying the HAPQ score (see [HAPQ](#hapq-haplotype-assignment-quality)), unless `--no-hapq` is set.
@@ -85,6 +87,32 @@ samtools sort -@ 12 -o merged.bam merged.sam
 
 By default, HipHap also writes `hiphap_{s1}_{s2}_span_chrom.fastq`, a FASTQ of reads whose alignments span more than one chromosome. These reads are emitted for easy realignment. Pass `--no-span-chrom` to skip writing this file.
 
+### Merged output (`--merge`)
+
+Instead of one file per haplotype, `--merge` writes a single combined output file with a merged header, so the separate `samtools merge` step is no longer needed:
+
+```bash
+hiphap --merge -1 mat -2 pat asm1_alignments.sam asm2_alignments.sam
+# Output: hiphap_mat_pat_merged.sam  hiphap_mat_pat_span_chrom.fastq
+
+# Save as sorted BAM
+samtools sort -@ 12 -o merged.bam hiphap_mat_pat_merged.sam
+```
+
+> [!WARNING]
+> In merge mode the **two assemblies must use disjoint contig names**. The merged header concatenates the two inputs' `@SQ` lists, so any contig name shared between them is ambiguous. HipHap rejects such inputs with an error. Haplotype FASTAs from `separate_haps_fasta` already satisfy this (e.g. `chr1_MATERNAL` vs `chr1_PATERNAL`); inputs that reuse the same names (e.g. GRCh38 vs CHM13, both `chr1`) cannot be merged.
+
+Notes:
+- In merge mode HipHap writes **only** the merged file; the per-haplotype `hiphap_{s1}.*` / `hiphap_{s2}.*` files are not produced.
+- The output format follows the input (SAM/BAM/CRAM); the merged header concatenates the two inputs' `@SQ` lists (see the contig-name warning above).
+- `--merge` cannot be combined with `--both`.
+- For **CRAM** inputs, merged output is also CRAM and requires a single combined reference (`--ref-merged <FILE>`) containing all contigs of both haplotypes — typically the original un-split diploid assembly:
+
+  ```bash
+  hiphap --merge --ref1 hg002v1.1.MATERNAL.fa --ref2 hg002v1.1.PATERNAL.fa \
+         --ref-merged hg002v1.1.fa asm1_alignments.cram asm2_alignments.cram
+  ```
+
 ### Comparing different reference genomes
 
 HipHap can also be used to select best alignments between different reference genomes (e.g. GRCh38 and CHM13). For this use case, the HAPQ score is generally not meaningful, so pass `--no-hapq` to skip its calculation:
@@ -111,7 +139,16 @@ minimap2 -cx map-hifi -o asm1_alignments.paf hg002v1.1.MATERNAL.fa reads.fastq
 minimap2 -cx map-hifi -o asm2_alignments.paf hg002v1.1.PATERNAL.fa reads.fastq
 
 hiphap --paf out_asm1.paf out_asm2.paf
-# Output: hiphap_asm1.paf  hiphap_asm2.paf
+# Output: hiphap_asm1.paf  hiphap_asm2.paf  hiphap_asm1_asm2_span_chrom.txt
+```
+
+For PAF input the chrom-spanning reads are written as a tab-separated text file (`hiphap_{s1}_{s2}_span_chrom.txt`: `qname`, comma-separated chroms, assembly label) rather than the FASTQ emitted for SAM/BAM/CRAM, since PAF carries no read sequence. Pass `--no-span-chrom` to skip it.
+
+`--merge` also works with PAF and simply concatenates the winning records into one file (no reference needed, since PAF records carry the target name directly):
+
+```bash
+hiphap --paf --merge out_asm1.paf out_asm2.paf
+# Output: hiphap_asm1_asm2_merged.paf
 ```
 
 ## Weighted Alignment Scoring Mechanism
