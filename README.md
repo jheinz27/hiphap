@@ -180,7 +180,7 @@ For each read, the assembly with the higher $S$ wins; its full alignment cluster
 
 ## Haplotype Assignment Quality (HapQ)
 
-For each read assigned to a winning haplotype, HipHap reports a HapQ score in the `hq:i:` tag of the output record. HapQ is a Phred-like confidence [0-60] that the read was assigned to the correct haplotype. The calculation is modeled on BWA-MEM's `mem_approx_mapq_se`.
+For each read assigned to a winning haplotype, HipHap reports a HapQ score in the `hq:i:` tag of the output record. HapQ is a Phred-like confidence [0-60] that the read was assigned to the correct haplotype. The calculation is modeled on BWA-MEM's [`mem_approx_mapq_se`](https://github.com/lh3/bwa/blob/b92993c1161e73167181558856567ef2f367e3f0/bwamem.c#L982-L1006).
 
 Let $S_w$ and $S_l$ be the weighted alignment scores of the winning and losing assemblies, $m$ the per-base match score of the alignment software used (`-A`/`--match-sc`), and $k$ the number of non-secondary alignments (splits) on the winning side.
 
