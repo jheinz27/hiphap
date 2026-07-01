@@ -82,10 +82,10 @@ hiphap -1 mat -2 pat asm1_alignments.sam asm2_alignments.sam
 samtools merge -@ 12 merged.sam hiphap_mat.sam hiphap_pat.sam
 
 # Save as sorted BAM
-samtools sort -@ 12 -o merged.bam merged.sam
+samtools sort -@ 12 -o hiphap_mat_pat_merged.bam hiphap_mat_pat_merged.sam
 ```
 
-By default, HipHap also writes `hiphap_{s1}_{s2}_span_chrom.fastq`, a FASTQ of reads whose alignments span more than one chromosome. These reads are emitted for easy realignment. Pass `--no-span-chrom` to skip writing this file.
+By default, HipHap also writes `hiphap_{s1}_{s2}_span_chrom.fastq`, a FASTQ of reads whose alignments span more than one chromosome. These reads are emitted for easy realignment. Pass `--no-span-chrom` to skip writing this file. If inputs are PAF files, a tsv of the chromosome spamnign reads rather than a fastq is output, as the read sequences are not stored in the input PAF files. 
 
 ### Merged output (`--merge`)
 
@@ -99,12 +99,9 @@ hiphap --merge -1 mat -2 pat asm1_alignments.sam asm2_alignments.sam
 samtools sort -@ 12 -o merged.bam hiphap_mat_pat_merged.sam
 ```
 
-> [!WARNING]
-> In merge mode the **two assemblies must use disjoint contig names**. The merged header concatenates the two inputs' `@SQ` lists, so any contig name shared between them is ambiguous. HipHap rejects such inputs with an error. Haplotype FASTAs from `separate_haps_fasta` already satisfy this (e.g. `chr1_MATERNAL` vs `chr1_PATERNAL`); inputs that reuse the same names (e.g. GRCh38 vs CHM13, both `chr1`) cannot be merged.
-
-Notes:
-- In merge mode HipHap writes **only** the merged file; the per-haplotype `hiphap_{s1}.*` / `hiphap_{s2}.*` files are not produced.
-- The output format follows the input (SAM/BAM/CRAM); the merged header concatenates the two inputs' `@SQ` lists (see the contig-name warning above).
+#### Notes:
+- In merge mode the **two assemblies must have unique contig names**. The merged header concatenates the two inputs `@SQ` lists, so any contig name shared between them is ambiguous 
+- In merge mode HipHap writes only the merged file; the per-haplotype `hiphap_{s1}.*` / `hiphap_{s2}.*` files are not produced.
 - `--merge` cannot be combined with `--both`.
 - For **CRAM** inputs, merged output is also CRAM and requires a single combined reference (`--ref-merged <FILE>`) containing all contigs of both haplotypes — typically the original un-split diploid assembly:
 
@@ -115,7 +112,7 @@ Notes:
 
 ### Comparing different reference genomes
 
-HipHap can also be used to select best alignments between different reference genomes (e.g. GRCh38 and CHM13). For this use case, the HAPQ score is generally not meaningful, so pass `--no-hapq` to skip its calculation:
+HipHap can also be used to select best alignment of a read between different reference genomes (e.g. GRCh38 and CHM13). For this use case, the HAPQ score is generally not meaningful, so pass `--no-hapq` to skip its calculation:
 
 ```bash
 hiphap --no-hapq -1 grch38 -2 chm13 grch38_alignments.sam chm13_alignments.sam
@@ -132,19 +129,19 @@ hiphap --ref1 asm1_hap.fasta --ref2 asm2_hap.fasta asm1_alignments.cram asm2_ali
 
 ## Example PAF Usage
 
-**NOTE:** It is important to use the `--paf-no-hit` flags when aligning with minimap2. If a SAM file is converted to a PAF file with `paftools.js sam2paf`, it will NOT have the required AS:i: tag.
+ #### Notes: 
+- It is important to use the `--paf-no-hit` flags when aligning with minimap2 to output unmapped reads to the file
+- If a SAM file is converted to a PAF file with `paftools.js sam2paf`, it will **NOT** have the required AS:i: tag and HipHap will fail to run
 
 ```bash
-minimap2 -cx map-hifi -o asm1_alignments.paf hg002v1.1.MATERNAL.fa reads.fastq
-minimap2 -cx map-hifi -o asm2_alignments.paf hg002v1.1.PATERNAL.fa reads.fastq
+minimap2 -cx map-hifi --paf-no-hit -o asm1_alignments.paf hg002v1.1.MATERNAL.fa reads.fastq
+minimap2 -cx map-hifi --paf-no-hit -o asm2_alignments.paf hg002v1.1.PATERNAL.fa reads.fastq
 
 hiphap --paf out_asm1.paf out_asm2.paf
 # Output: hiphap_asm1.paf  hiphap_asm2.paf  hiphap_asm1_asm2_span_chrom.txt
 ```
 
-For PAF input the chrom-spanning reads are written as a tab-separated text file (`hiphap_{s1}_{s2}_span_chrom.txt`: `qname`, comma-separated chroms, assembly label) rather than the FASTQ emitted for SAM/BAM/CRAM, since PAF carries no read sequence. Pass `--no-span-chrom` to skip it.
-
-`--merge` also works with PAF and simply concatenates the winning records into one file (no reference needed, since PAF records carry the target name directly):
+`--merge` also works with PAF 
 
 ```bash
 hiphap --paf --merge out_asm1.paf out_asm2.paf
@@ -181,20 +178,20 @@ The first factor is the average alignment score per aligned base. It is multipli
 
 For each read, the assembly with the higher $S$ wins; its full alignment cluster (including secondary alignments) is written to the corresponding output file. If $S$ is equal in both assemblies, the "better" assignment is determined by a hash of the read name, or the read is written to both output files when `--both` is used.
 
-## HapQ (haplotype assignment quality)
+## Haplotype Assignment Quality (HapQ)
 
 For each read assigned to a winning haplotype, HipHap reports a HapQ score in the `hq:i:` tag of the output record. HapQ is a Phred-like confidence [0-60] that the read was assigned to the correct haplotype. The calculation is modeled on BWA-MEM's `mem_approx_mapq_se`.
 
-Let $S_w$ and $S_l$ be the weighted alignment scores of the winning and losing assemblies, $m$ the per-base match score of the alignment software used (`-A`/`--match-sc`, auto-estimated from the `ms:i:` tags of the input files when not set explicitly), and $k$ the number of non-secondary alignments (splits) on the winning side.
+Let $S_w$ and $S_l$ be the weighted alignment scores of the winning and losing assemblies, $m$ the per-base match score of the alignment software used (`-A`/`--match-sc`), and $k$ the number of non-secondary alignments (splits) on the winning side.
 
 HapQ is the product of: 
 
-d is approximately the difference, in matching bases, between the winning and losing alignments.
+d, the approximate difference, in matching bases, between the winning and losing alignments between haplotypes.
 ```math
 d = \frac{S_w - S_l}{m}
 ```
 
-The split penalty $\rho$ down-weights reads with more than three split alignments, which often fall in complex/repetitive regions where haplotype assignment is less reliable.
+The split penalty, $\rho$ , which penalizes reads with more than three split alignments, which often fall in complex/repetitive regions where haplotype assignment is less reliable.
 ```math
 \rho = \begin{cases} 1 & k \le 3 \\ \frac{3}{k} & k > 3 \end{cases}
 ```
