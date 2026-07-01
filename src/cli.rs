@@ -3,7 +3,6 @@ use clap::{Parser, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command( name = "HipHap", about = "HipHap: Choose the best alignment to each haploid of a diploid assembly", version)]
-
 pub struct Cli {
     //
     #[arg(value_name = "ASM1", help="asm1 alignment file (sam/bam/cram/paf)")]

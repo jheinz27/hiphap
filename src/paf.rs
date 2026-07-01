@@ -29,7 +29,7 @@ pub fn estimate_minimap2_a_paf(paf_path: &str) -> Result<i32, Box<dyn std::error
             .map_err(|e| format!("Error reading '{}' during -A estimation: {}. Set -A/--match_sc explicitly.", paf_path, e))?;
         if n == 0 { break; } //EOF
 
-        let trimmed = line.trim_end_matches(|c| c == '\n' || c == '\r');
+        let trimmed = line.trim_end_matches(['\n', '\r']);
         if trimmed.is_empty() { continue; }
 
         //skip unmapped: target name (col 6, index 5) is "*"
@@ -134,10 +134,9 @@ fn paf_get_chrom(rec: &str) -> Option<&str> {
                 if f == "*" { return None; } // unmapped
                 tname = Some(f);
             }
-            i if i >= 12 => {
+            i if i >= 12
                 //ignore secondary alignments
-                if f == "tp:A:S" { return None; }
-            }
+                && f == "tp:A:S" => { return None; }
             _ => {} 
         }
     }
@@ -243,7 +242,7 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         //get cluster with the higher alignment score, returns the Winner enum and HAPQ
-        let (winner, hapq) = compare_clusters(&mut cluster_asm1, &mut cluster_asm2, args, resolved_match_sc)?;
+        let (winner, hapq) = compare_clusters(&cluster_asm1, &cluster_asm2, args, resolved_match_sc)?;
 
        
         //format hq tag suffix if hapq mode is active
@@ -380,7 +379,7 @@ where
     }
 
     //mutated cluster vector in place, only need to return result Ok
-    return Ok(())
+    Ok(())
 }
 
 
@@ -415,8 +414,8 @@ pub fn get_weighted_score(cur_clust : &Vec<String>, tag_prefix: &str) -> Result<
         //find score and tp tags (start from field 12)
         for field in fields.skip(8) { // skip to tags
             if field.starts_with("tp:A:S") { is_secondary = true; } // check for secondary alignment tag
-            if field.starts_with(tag_prefix) {
-                 as_score = field[tag_prefix.len()..].parse()
+            if let Some(val) = field.strip_prefix(tag_prefix) {
+                 as_score = val.parse()
                     .map_err(|e| format!("Invalid {} value in PAF: {}", tag_prefix, e))?;
             }
         }
@@ -451,7 +450,7 @@ pub fn get_weighted_score(cur_clust : &Vec<String>, tag_prefix: &str) -> Result<
 
     //weighted_score = (SUM(Alignment_Score) / SUM(Alignment_len)) * tot read_bps_aligned * cov_fraction
     let cov_fraction = read_bps_aligned as f32 / read_len as f32;
-    return Ok(((sum_alignment_scores as f32 / sum_alignment_lens as f32) * read_bps_aligned as f32 * cov_fraction, n_splits));
+    Ok(((sum_alignment_scores as f32 / sum_alignment_lens as f32) * read_bps_aligned as f32 * cov_fraction, n_splits))
 
 }
 

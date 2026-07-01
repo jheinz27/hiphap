@@ -91,7 +91,7 @@ fn get_format_from_path<P: AsRef<Path>>(path: P) -> Result<bam::Format, Box<dyn 
         .map_err(|_| format!("Invalid path (contains null byte): {}", path_str))?;
 
     unsafe {
-        let hts_file = htslib::hts_open(c_path.as_ptr(), b"r\0".as_ptr() as *const i8);
+        let hts_file = htslib::hts_open(c_path.as_ptr(), c"r".as_ptr());
         if hts_file.is_null() {
             return Err(format!("Could not open file: {}", path_str).into());
         }
@@ -111,12 +111,12 @@ fn get_format_from_path<P: AsRef<Path>>(path: P) -> Result<bam::Format, Box<dyn 
 
 //function to check both input files are of same type
 fn formats_equal(a: &bam::Format, b: &bam::Format) -> bool {
-    match (a, b) {
-        (bam::Format::Bam, bam::Format::Bam) => true,
-        (bam::Format::Cram, bam::Format::Cram) => true,
-        (bam::Format::Sam, bam::Format::Sam) => true,
-        _ => false,
-    }
+    matches!(
+        (a, b),
+        (bam::Format::Bam, bam::Format::Bam)
+            | (bam::Format::Cram, bam::Format::Cram)
+            | (bam::Format::Sam, bam::Format::Sam)
+    )
 }
 
 //main logic 
@@ -329,7 +329,7 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         //get cluster with the higher alignment score, returns the Winner enum and HAPQ
-        let (winner, hapq) = compare_clusters(&mut cluster_asm1, &mut cluster_asm2, &args, resolved_match_sc)?;
+        let (winner, hapq) = compare_clusters(&mut cluster_asm1, &mut cluster_asm2, args, resolved_match_sc)?;
 
         //logic for which file to write read to given weighted AS comparison output
         match winner {
@@ -522,7 +522,7 @@ fn get_weighted_score(cur_clust : &mut Vec<Record>, tag: &[u8]) -> Result<(f32, 
     //average alignment score per base across all aligning segments
     // multiplied by unique aligned bases, scaled by coverage fraction of the read
     let cov_fraction = read_bps_aligned as f32 / read_len as f32;
-    return Ok(((sum_alignment_scores as f32 / sum_alignment_lens as f32) * read_bps_aligned as f32 * cov_fraction, n_splits));
+    Ok(((sum_alignment_scores as f32 / sum_alignment_lens as f32) * read_bps_aligned as f32 * cov_fraction, n_splits))
 
 }
 
@@ -596,7 +596,7 @@ fn get_alignment_len(rec: &Record) -> u32  {
             _ => {}
         }
     }
-    return qlen;
+    qlen
 }
 
 //function to get start of query span from cigar string
@@ -613,7 +613,7 @@ fn get_query_start(rec: &Record) -> u32 {
                 _ => break,
             }
         }
-        return right;
+        right
 
     //if record is aligned in the forward direction, take left clip
     } else {
@@ -625,7 +625,7 @@ fn get_query_start(rec: &Record) -> u32 {
                 _ => break,
             }
         }
-        return left;
+        left
     }
 
 
@@ -740,7 +740,7 @@ fn pg_chain_leaf(text: &[u8]) -> Option<Vec<u8>> {
 //(asm1's) and rewriting asm2-internal PP references to the renamed IDs. 
 //claude assisted (checked)
 fn append_asm2_pg(text: &mut Vec<u8>, asm2_hdr: &bam::HeaderView) {
-    if text.last().map_or(false, |&b| b != b'\n') {
+    if text.last().is_some_and(|&b| b != b'\n') {
         text.push(b'\n');
     }
     let asm2_bytes = asm2_hdr.as_bytes();
@@ -794,7 +794,7 @@ fn append_asm2_pg(text: &mut Vec<u8>, asm2_hdr: &bam::HeaderView) {
 //`pp` is the previous-program ID to chain onto 
 //claude assisted (checked)
 fn append_hiphap_pg(text: &mut Vec<u8>, cl: &str, pp: Option<&[u8]>) {
-    if text.last().map_or(false, |&b| b != b'\n') {
+    if text.last().is_some_and(|&b| b != b'\n') {
         text.push(b'\n');
     }
     let ids = collect_pg_ids(text);

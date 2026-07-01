@@ -35,13 +35,13 @@ pub fn compute_hapq(score_winner: f32, score_loser: f32, n_splits: u32, match_sc
     //penalize reads with more that 3 split aligments (likely a complex region)
     let pen_split = if n_splits <= 3 { 1.0 } else { 3.0 / n_splits as f32 };
     let score = 6.02 * diff * pen_split;
-    return score.clamp(0.0, 60.0) as u8; 
+    score.clamp(0.0, 60.0) as u8
     
 }
 
 //helper function to merge any read alignment segments that overlap in read coordinates
 //returns count of unique bps of the read contained in any alignment segment
-pub fn merge_intervals(intervals: &mut Vec<(u32, u32)>) -> u32 {
+pub fn merge_intervals(intervals: &mut [(u32, u32)]) -> u32 {
     //sort cluster by read start location of alignment segment
     intervals.sort_unstable_by_key(|k| k.0);
     
@@ -67,6 +67,6 @@ pub fn merge_intervals(intervals: &mut Vec<(u32, u32)>) -> u32 {
         //add final overlap segment
         read_bps_aligned += cur_end - cur_start
     }
-    return read_bps_aligned; 
+    read_bps_aligned
 }
  

@@ -8,7 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>>  {
 
     //reject a non-positive match score: HAPQ divides by it, so 0/negative/NaN would yield bogus scores
     if let Some(v) = args.match_sc {
-        if !(v > 0.0) {
+        if v <= 0.0 || v.is_nan() {
             return Err(format!("--match-sc must be a positive number (got {})", v).into());
         }
     }
