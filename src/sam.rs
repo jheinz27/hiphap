@@ -144,6 +144,18 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("Input files must have the same format (found {:?} and {:?})", asm1_format, asm2_format).into());
     }
 
+    //resolve the output format: the input format unless --out-fmt asks for another one
+    //(e.g. SAM input written as compressed BAM)
+    let out_format = match args.out_fmt {
+        None => asm1_format,
+        Some(crate::cli::OutFormat::Sam) => bam::Format::Sam,
+        Some(crate::cli::OutFormat::Bam) => bam::Format::Bam,
+        Some(crate::cli::OutFormat::Cram) => bam::Format::Cram,
+    };
+    //whether either side of the run is CRAM decides which references are needed
+    let input_is_cram = matches!(asm1_format, bam::Format::Cram);
+    let out_is_cram = matches!(out_format, bam::Format::Cram);
+
     // read in both files
     let mut asm1_reader = bam::Reader::from_path(&args.asm1)
         .map_err(|e| format!("Failed to open asm1 file '{}': {}", args.asm1, e))?;
@@ -163,15 +175,14 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     //offset applied to asm2 reference ids when writing (n1 when merging, 0 with -p)
     let asm2_offset = if args.partition { 0 } else { n1 };
 
-    //get proper file extension for output based on input format
-    //previos checked that fommats were the same between files
-    let extension = match asm1_format {
+    //get proper file extension for output based on the resolved output format
+    let extension = match out_format {
         bam::Format::Bam => ".bam",
         bam::Format::Sam => ".sam",
         bam::Format::Cram => ".cram",
     };
-    //the output format follows the input, so flag an -o extension that says otherwise
-    crate::warn_output_ext_mismatch(args, extension);
+    //the output format follows the input (or --out-fmt), so flag an -o extension that says otherwise
+    crate::warn_output_ext_mismatch(args, extension, args.out_fmt.is_some());
 
     //merged mode validation (merged is the default; -p writes one file per haplotype)
     if !args.partition {
@@ -189,10 +200,8 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             ).into());
         }
         //a single CRAM writer needs one combined reference covering all contigs of both haplotypes
-        if let bam::Format::Cram = asm1_format {
-            if args.ref_merged.is_none() {
-                return Err("Merged CRAM output requires a combined reference FASTA containing all contigs of both inputs. Use --ref-merged <FILE>".into());
-            }
+        if out_is_cram && args.ref_merged.is_none() {
+            return Err("Merged CRAM output requires a combined reference FASTA containing all contigs of both inputs. Use --ref-merged <FILE>".into());
         }
     } else if args.ref_merged.is_some() {
         eprintln!("Warning: --ref-merged is ignored with -p/--partition");
@@ -213,7 +222,7 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         //merged: out_asm1 is the single merged writer and out_asm2 is None
         None => {
             let merged_header = build_merged_header(&asm1_hdr, &asm2_hdr, &hiphap_cl);
-            let w = Writer::from_path(&primary_path, &merged_header, asm1_format)
+            let w = Writer::from_path(&primary_path, &merged_header, out_format)
                 .map_err(|e| format!("Failed to create output file '{}': {}", primary_path, e))?;
             (w, None)
         }
@@ -221,41 +230,59 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         Some(asm2_out_path) => {
             let header_asm1 = header_with_pg(&asm1_hdr, &hiphap_cl);
             let header_asm2 = header_with_pg(&asm2_hdr, &hiphap_cl);
-            let w1 = Writer::from_path(&primary_path, &header_asm1, asm1_format)
+            let w1 = Writer::from_path(&primary_path, &header_asm1, out_format)
                 .map_err(|e| format!("Failed to create output file '{}': {}", primary_path, e))?;
-            let w2 = Writer::from_path(asm2_out_path, &header_asm2, asm2_format)
+            let w2 = Writer::from_path(asm2_out_path, &header_asm2, out_format)
                 .map_err(|e| format!("Failed to create output file '{}': {}", asm2_out_path, e))?;
             (w1, Some(w2))
         }
     };
 
-    // set cram reference for readers and writers if cram input 
-    if let bam::Format::Cram = asm1_format {
-        //set readers
-        let r1 = args.ref1.as_deref()
-            .ok_or("Input format is CRAM, but no reference FASTA for asm1 provided. Use --ref1 <FILE>")?;
-        asm1_reader.set_reference(r1)
-            .map_err(|e| format!("Failed to set reference for asm1 Reader: {}", e))?;
-        let r2 = args.ref2.as_deref()
-            .ok_or("Input format is CRAM, but no reference FASTA for asm2 provided. Use --ref2 <FILE>")?;
-        asm2_reader.set_reference(r2)
-            .map_err(|e| format!("Failed to set reference for asm2 Reader: {}", e))?;
-
-        //set to diploid reference writer when merging
-        if !args.partition {
-            let rm = args.ref_merged.as_deref().unwrap();
-            out_asm1.set_reference(rm)
-                .map_err(|e| format!("Failed to set reference for merged Writer: {}", e))?;
-        //else set each partitioned file to respectinve reference fasta of input
+    //resolve CRAM references: any CRAM reader or writer needs its reference FASTA. A CRAM input
+    //needs --ref1/--ref2 for the two readers; a partitioned CRAM output needs them for the two
+    //writers, while a merged CRAM output needs --ref-merged (checked above). SAM/BAM need none.
+    if input_is_cram || out_is_cram {
+        //the per-haplotype references are needed by the readers, and by the writers under -p
+        let need_haplo_refs = input_is_cram || (out_is_cram && args.partition);
+        let r1 = if need_haplo_refs {
+            Some(args.ref1.as_deref().ok_or(
+                "CRAM input or output, but no reference FASTA for asm1 provided. Use --ref1 <FILE>")?)
         } else {
-            out_asm1.set_reference(r1)
-                .map_err(|e| format!("Failed to set reference for asm1 Writer: {}", e))?;
-            out_asm2.as_mut().unwrap().set_reference(r2)
-                .map_err(|e| format!("Failed to set reference for asm2 Writer: {}", e))?;
+            None
+        };
+        let r2 = if need_haplo_refs {
+            Some(args.ref2.as_deref().ok_or(
+                "CRAM input or output, but no reference FASTA for asm2 provided. Use --ref2 <FILE>")?)
+        } else {
+            None
+        };
+
+        //set reader references when the input is CRAM
+        if input_is_cram {
+            asm1_reader.set_reference(r1.unwrap())
+                .map_err(|e| format!("Failed to set reference for asm1 Reader: {}", e))?;
+            asm2_reader.set_reference(r2.unwrap())
+                .map_err(|e| format!("Failed to set reference for asm2 Reader: {}", e))?;
+        }
+
+        //set writer references when the output is CRAM
+        if out_is_cram {
+            if !args.partition {
+                //a single merged CRAM writer needs one combined reference for both haplotypes
+                let rm = args.ref_merged.as_deref().unwrap();
+                out_asm1.set_reference(rm)
+                    .map_err(|e| format!("Failed to set reference for merged Writer: {}", e))?;
+            } else {
+                //each per-haplotype file uses its own haplotype's reference
+                out_asm1.set_reference(r1.unwrap())
+                    .map_err(|e| format!("Failed to set reference for asm1 Writer: {}", e))?;
+                out_asm2.as_mut().unwrap().set_reference(r2.unwrap())
+                    .map_err(|e| format!("Failed to set reference for asm2 Writer: {}", e))?;
+            }
         }
     } else {
-        if args.ref1.is_some() { eprintln!("Warning: --ref1 is ignored for non-CRAM input"); }
-        if args.ref2.is_some() { eprintln!("Warning: --ref2 is ignored for non-CRAM input"); }
+        if args.ref1.is_some() { eprintln!("Warning: --ref1 is ignored (neither input nor output is CRAM)"); }
+        if args.ref2.is_some() { eprintln!("Warning: --ref2 is ignored (neither input nor output is CRAM)"); }
     }
 
     //autoestimate match score (-A in minimap2) from MS tag 
@@ -288,7 +315,7 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let n_writers = if out_asm2.is_some() { 2 } else { 1 };
     //set threads: for compressed output a writer is weighted 4x a reader when merging and 3x
     //when partitioned; plain SAM text is 1x
-    let writer_weight = match asm1_format {
+    let writer_weight = match out_format {
         bam::Format::Sam => 1,
         bam::Format::Bam | bam::Format::Cram => if n_writers == 1 { 4 } else { 3 },
     };

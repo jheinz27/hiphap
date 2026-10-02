@@ -186,7 +186,7 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     //the output format follows the input, so flag an -o extension that says otherwise
     //(--ref-merged is already warned about as PAF-irrelevant in main.rs)
-    crate::warn_output_ext_mismatch(args, ".paf");
+    crate::warn_output_ext_mismatch(args, ".paf", false);
 
     //resolve match score: user override takes precedence, else auto-estimate from both PAFs
     let resolved_match_sc: f32 = if args.no_hapq {

@@ -25,6 +25,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>>  {
         if args.ref1.is_some() || args.ref2.is_some() || args.ref_merged.is_some() {
             eprintln!("Warning: --ref1/--ref2/--ref-merged are ignored in PAF mode");
         }
+        //PAF output is always plain text; there is no BAM/CRAM equivalent to switch to
+        if args.out_fmt.is_some() {
+            return Err("--out-fmt is not supported in PAF mode (PAF output is always plain text)".into());
+        }
         paf::process_paf(&args)?;
     } else {
         sam::process_sam(&args)?;

@@ -121,9 +121,10 @@ pub fn output_paths(args: &Cli, ext: &str, span_ext: &str) -> (String, Option<St
     }
 }
 
-//the output format always follows the input format, so an -o extension that disagrees is
-//silently ignored; say so rather than leaving SAM text in a file named .bam
-pub fn warn_output_ext_mismatch(args: &Cli, ext: &str) {
+//the output format follows the input format (or an explicit --out-fmt), so an -o extension that
+//disagrees is silently ignored; say so rather than leaving SAM text in a file named .bam
+//`overridden` is true when --out-fmt set the format, which changes where it came from
+pub fn warn_output_ext_mismatch(args: &Cli, ext: &str, overridden: bool) {
     let Some(o) = &args.output else { return };
     let stem = strip_aln_ext(o);
     //no recognised extension to disagree with
@@ -132,9 +133,11 @@ pub fn warn_output_ext_mismatch(args: &Cli, ext: &str) {
     }
     let given = &o[stem.len()..];
     if !given.eq_ignore_ascii_case(ext) {
+        let fmt = ext.trim_start_matches('.').to_uppercase();
+        let source = if overridden { "set by --out-fmt" } else { "taken from the input" };
         eprintln!(
-            "Warning: output format is {} (taken from the input); the '{}' extension of '{}' is ignored",
-            ext.trim_start_matches('.').to_uppercase(), given, o
+            "Warning: output format is {} ({}); the '{}' extension of '{}' is ignored",
+            fmt, source, given, o
         );
     }
 }

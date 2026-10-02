@@ -71,6 +71,10 @@ pub struct Cli {
     #[arg(long, default_value_t = false, help = "disable writing the chromosome-spanning reads file (*_span_chrom.fastq, or .txt for PAF)")]
     pub no_span_chrom: bool,
 
+    // output format; defaults to the input format
+    #[arg(short = 'O', long = "out-fmt", value_name = "FMT", value_enum, help = "output format: sam, bam, or cram [default: same as input]")]
+    pub out_fmt: Option<OutFormat>,
+
     // number of total threads to use;
     #[arg(short, long,value_name = "INT", help = "number of threads[default: 6; 8 with -p]")]
     pub threads: Option<usize>
@@ -87,4 +91,13 @@ pub enum UnmappedDest {
     Asm1,
     Asm2,
     Discard,
+}
+
+//output alignment format for a run; the alignment output follows the input format unless
+//--out-fmt overrides it (e.g. SAM input written as compressed BAM)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutFormat {
+    Sam,
+    Bam,
+    Cram,
 }

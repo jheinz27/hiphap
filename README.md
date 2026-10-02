@@ -83,6 +83,7 @@ Options:
   -A, --match-sc <FLOAT>    per-base match score from aligner scoring scheme (auto-estimated if omitted)
       --no-hapq             skip HAPQ score calculation and hq tag output (e.g. for comparing GRCh38 vs CHM13)
       --no-span-chrom       disable writing the chromosome-spanning reads file (*_span_chrom.fastq, or .txt for PAF)
+  -O, --out-fmt <FMT>       output format: sam, bam, or cram [default: same as input] [possible values: sam, bam, cram]
   -t, --threads <INT>       number of threads[default: 6; 8 with -p]
   -h, --help                Print help
   -V, --version             Print version
@@ -126,7 +127,27 @@ HipHap also writes `hiphap_{s1}_{s2}_span_chrom.fastq`, a FASTQ of reads whose a
 
 #### Notes:
 - Merged output requires the two assemblies to have **unique contig names**. The merged header concatenates the two inputs `@SQ` lists, so any contig name shared between them is ambiguous; pass `-p` for such inputs.
-- The output format always follows the input format. An `-o` extension that disagrees is ignored, with a warning.
+- The output format follows the input format by default (SAM → SAM, BAM → BAM, CRAM → CRAM); use `-O`/`--out-fmt` to choose another format. An `-o` extension that disagrees with the resolved format is ignored, with a warning.
+
+### Compressed output (BAM/CRAM) with `-O`/`--out-fmt`
+
+By default the output format follows the input format, so aligning with SAM input writes plain SAM. Pass `-O`/`--out-fmt` to write another format, e.g. to get compressed BAM directly from SAM input without a separate `samtools sort`/`samtools view -b` step:
+
+```bash
+# Partitioned mode: one compressed BAM per haplotype
+hiphap -p -1 mat -2 pat --out-fmt bam asm1_alignments.sam asm2_alignments.sam
+# Output: hiphap_mat.bam  hiphap_pat.bam  hiphap_mat_pat_span_chrom.fastq
+
+# Merged mode: single compressed BAM with a merged header
+hiphap -1 mat -2 pat --out-fmt bam asm1_alignments.sam asm2_alignments.sam
+# Output: hiphap_mat_pat_merged.bam  hiphap_mat_pat_span_chrom.fastq
+```
+
+The accepted values are `sam`, `bam`, and `cram`. The chosen format also drives the output file extension when `-o` is not given.
+
+- **BAM/CRAM output is compressed**, so it needs no separate conversion step; use `samtools sort` afterwards only if a coordinate-sorted file is required.
+- **CRAM output needs a reference.** With `-p` pass `--ref1`/`--ref2` (the two haplotype FASTAs); merged CRAM output additionally requires `--ref-merged` (a single FASTA containing all contigs of both haplotypes), exactly as for CRAM input.
+- `--out-fmt` is not supported in PAF mode; PAF output is always plain text.
 
 ### Partitioned mode: Separate output file per haplotype (`-p`)
 
