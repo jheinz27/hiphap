@@ -71,6 +71,10 @@ pub struct Cli {
     #[arg(long, default_value_t = false, help = "disable writing the chromosome-spanning reads file (*_span_chrom.fastq, or .txt for PAF)")]
     pub no_span_chrom: bool,
 
+    // drop the B/R coverage-fraction term from the weighted alignment score
+    #[arg(long, default_value_t = false, help = "don't penalize partially aligned reads in assignment")]
+    pub no_cov_penalty: bool,
+
     // number of total threads to use;
     #[arg(short, long,value_name = "INT", help = "number of threads[default: 6; 8 with -p]")]
     pub threads: Option<usize>

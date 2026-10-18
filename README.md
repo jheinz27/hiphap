@@ -83,6 +83,7 @@ Options:
   -A, --match-sc <FLOAT>    per-base match score from aligner scoring scheme (auto-estimated if omitted)
       --no-hapq             skip HAPQ score calculation and hq tag output (e.g. for comparing GRCh38 vs CHM13)
       --no-span-chrom       disable writing the chromosome-spanning reads file (*_span_chrom.fastq, or .txt for PAF)
+      --no-cov-penalty      don't penalize partially aligned reads in assignment
   -t, --threads <INT>       number of threads[default: 6; 8 with -p]
   -h, --help                Print help
   -V, --version             Print version
