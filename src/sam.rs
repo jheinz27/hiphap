@@ -537,7 +537,7 @@ where
 //helper function to get weighted score of reads using a specified tag (AS or ms)
 //supplental alignments read segments may have overlapping alignments in read coords
 //want to take average alignment score for every base in the read to determine total score
-fn get_weighted_score(cur_clust : &mut Vec<Record>, tag: &[u8]) -> Result<(f32, u32), Box<dyn std::error::Error>> {
+fn get_weighted_score(cur_clust : &mut Vec<Record>, tag: &[u8], cov_penalty: bool) -> Result<(f32, u32), Box<dyn std::error::Error>> {
     //get read name
     let qname = String::from_utf8_lossy(cur_clust[0].qname()).into_owned();
     let mut sum_alignment_lens = 0;
@@ -595,7 +595,8 @@ fn get_weighted_score(cur_clust : &mut Vec<Record>, tag: &[u8]) -> Result<(f32, 
     //calc weighted alignment score:
     //average alignment score per base across all aligning segments
     // multiplied by unique aligned bases, scaled by coverage fraction of the read
-    let cov_fraction = read_bps_aligned as f32 / read_len as f32;
+    //coverage fraction scaling is skipped with --no-cov-penalty
+    let cov_fraction = if cov_penalty { read_bps_aligned as f32 / read_len as f32 } else { 1.0 };
     Ok(((sum_alignment_scores as f32 / sum_alignment_lens as f32) * read_bps_aligned as f32 * cov_fraction, n_splits))
 
 }
@@ -630,8 +631,8 @@ fn compare_clusters<'a>(clust1:&'a mut Vec<Record>, clust2:&'a mut Vec<Record>, 
     let tag: &[u8] = if args.ms { b"ms" } else { b"AS" };
 
     //get score and number of non-secondary alignment segments for each cluster
-    let (score1, n_splits1) = get_weighted_score(clust1, tag)?;
-    let (score2, n_splits2) = get_weighted_score(clust2, tag)?;
+    let (score1, n_splits1) = get_weighted_score(clust1, tag, !args.no_cov_penalty)?;
+    let (score2, n_splits2) = get_weighted_score(clust2, tag, !args.no_cov_penalty)?;
 
     //return respective winner depending on which AS is higher,
     //both is a special case that can be determined by user input

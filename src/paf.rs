@@ -467,7 +467,7 @@ fn cluster_qlen(cluster: &[String]) -> u64 {
 
 //helper function to get weighted score of split reads using a specified tag (AS or ms)
 //weighted_score = (SUM(score) / SUM(Alignment_len)) * tot read_bps_aligned
-pub fn get_weighted_score(cur_clust : &Vec<String>, tag_prefix: &str) -> Result<(f32, u32), Box<dyn std::error::Error>> {
+pub fn get_weighted_score(cur_clust : &Vec<String>, tag_prefix: &str, cov_penalty: bool) -> Result<(f32, u32), Box<dyn std::error::Error>> {
     let mut sum_alignment_lens = 0;
     let mut sum_alignment_scores = 0;
     let mut n_splits: u32 = 0;
@@ -533,7 +533,8 @@ pub fn get_weighted_score(cur_clust : &Vec<String>, tag_prefix: &str) -> Result<
     let read_bps_aligned = crate::merge_intervals(&mut read_intervals);
 
     //weighted_score = (SUM(Alignment_Score) / SUM(Alignment_len)) * tot read_bps_aligned * cov_fraction
-    let cov_fraction = read_bps_aligned as f32 / read_len as f32;
+    //cov_fraction is fixed at 1 with --no-cov-penalty
+    let cov_fraction = if cov_penalty { read_bps_aligned as f32 / read_len as f32 } else { 1.0 };
     Ok(((sum_alignment_scores as f32 / sum_alignment_lens as f32) * read_bps_aligned as f32 * cov_fraction, n_splits))
 
 }
@@ -553,8 +554,8 @@ pub fn compare_clusters<'a>(clust1:&'a Vec<String>, clust2:&'a Vec<String>, args
 
     let tag_prefix = if args.ms { "ms:i:" } else { "AS:i:" };
     //get score and number of non-secondary alignment segments for each cluster
-    let (score1, n_splits1) = get_weighted_score(clust1, tag_prefix)?;
-    let (score2, n_splits2) = get_weighted_score(clust2, tag_prefix)?;
+    let (score1, n_splits1) = get_weighted_score(clust1, tag_prefix, !args.no_cov_penalty)?;
+    let (score2, n_splits2) = get_weighted_score(clust2, tag_prefix, !args.no_cov_penalty)?;
 
     //return respective winner depending on which AS is higher,
     //both is a special case that can be determined by user input

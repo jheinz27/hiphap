@@ -84,6 +84,7 @@ Options:
       --no-hapq             skip HAPQ score calculation and hq tag output (e.g. for comparing GRCh38 vs CHM13)
       --no-span-chrom       disable writing the chromosome-spanning reads file (*_span_chrom.fastq, or .txt for PAF)
   -O, --out-fmt <FMT>       output format: sam, bam, or cram [default: same as input] [possible values: sam, bam, cram]
+      --no-cov-penalty      don't penalize partially aligned reads in assignment
   -t, --threads <INT>       number of threads[default: 6; 8 with -p]
   -h, --help                Print help
   -V, --version             Print version
@@ -261,4 +262,4 @@ Details:
 In PAF `hs` is always `P`: minimap2 gives every non-secondary chain `tp:A:P`, including the ones that become supplementary in SAM, so a PAF line carries nothing that separates the two. `hs:A:S` only ever appears in SAM/BAM/CRAM output.
 
 ## Citation
-If HipHap has helped you in your research, please cite our preprint at: TODO
+If HipHap has helped you in your research, please cite our [preprint](https://www.biorxiv.org/content/10.64898/2026.09.24.754153v1). 
