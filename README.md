@@ -129,8 +129,7 @@ HipHap also writes `hiphap_{s1}_{s2}_span_chrom.fastq`, a FASTQ of reads whose a
 
 #### Notes:
 - Merged output requires the two assemblies to have **unique contig names**. The merged header concatenates the two inputs `@SQ` lists, so any contig name shared between them is ambiguous; pass `-p` for such inputs.
-- The output format follows the input format by default (SAM → SAM, BAM → BAM, CRAM → CRAM); use `-O`/`--out-fmt` to write SAM or BAM instead.
-
+- The output format follows the input format by default (SAM → SAM, BAM → BAM, CRAM → CRAM); use `-O`/`--out-fmt` to write SAM or BAM instead. SAM → CRAM or BAM → CRAM are not supported for `-O`
 ### Partitioned mode: Separate output file per haplotype (`-p`)
 
 `-p`/`--partition` writes one output file per haplotype instead of the merged file:
