@@ -27,9 +27,9 @@ HipHap resolves this issue by aligning reads to each haplotype assembly separate
 Prebuilt binaries can be downloaded from the [Releases](https://github.com/jheinz27/hiphap/releases) page.
 
 ```bash
-wget https://github.com/jheinz27/hiphap/releases/download/v0.1.0/hiphap-v0.1.0-x86_64-unknown-linux-musl.tar.gz
-tar -xvzf hiphap-v0.1.0-x86_64-unknown-linux-musl.tar.gz
-hiphap-v0.1.0-x86_64-unknown-linux-musl/hiphap --help
+wget https://github.com/jheinz27/hiphap/releases/download/v0.2.0/hiphap-v0.2.0-x86_64-unknown-linux-musl.tar.gz
+tar -xvzf hiphap-v0.2.0-x86_64-unknown-linux-musl.tar.gz
+hiphap-v0.2.0-x86_64-unknown-linux-musl/hiphap --help
 ``` 
 
 ### Build from source:
@@ -46,7 +46,7 @@ If Rust is not already installed, install it with [rustup](https://rustup.rs/). 
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ``` 
 #### Dependencies 
-- `Rust >= 1.70`, including Cargo
+- `Rust >= 1.74`, including Cargo
 - The following Rust crate dependencies are installed automatically by Cargo during the build:
   - `clap = "4.0"`
   - `rust-htslib = "0.46.0"`
@@ -129,7 +129,7 @@ HipHap also writes `hiphap_{s1}_{s2}_span_chrom.fastq`, a FASTQ of reads whose a
 
 #### Notes:
 - Merged output requires the two assemblies to have **unique contig names**. The merged header concatenates the two inputs `@SQ` lists, so any contig name shared between them is ambiguous; pass `-p` for such inputs.
-- The output format follows the input format by default (SAM → SAM, BAM → BAM, CRAM → CRAM); use `-O`/`--out-fmt` to set another
+- The output format follows the input format by default (SAM → SAM, BAM → BAM, CRAM → CRAM); use `-O`/`--out-fmt` to write SAM or BAM instead.
 
 ### Partitioned mode: Separate output file per haplotype (`-p`)
 
