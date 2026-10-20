@@ -155,6 +155,10 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     //whether either side of the run is CRAM decides which references are needed
     let input_is_cram = matches!(asm1_format, bam::Format::Cram);
     let out_is_cram = matches!(out_format, bam::Format::Cram);
+    //CRAM is only written for CRAM input (see OutFormat in cli.rs)
+    if out_is_cram && !input_is_cram {
+        return Err("--out-fmt cram can only be written if input is already CRAM format; use --out-fmt bam or convert input to cram with samtools".into());
+    }
 
     // read in both files
     let mut asm1_reader = bam::Reader::from_path(&args.asm1)
@@ -203,9 +207,29 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         if out_is_cram && args.ref_merged.is_none() {
             return Err("Merged CRAM output requires a combined reference FASTA containing all contigs of both inputs. Use --ref-merged <FILE>".into());
         }
+        if !out_is_cram && args.ref_merged.is_some() {
+            eprintln!("Warning: --ref-merged is ignored for non-CRAM output");
+        }
     } else if args.ref_merged.is_some() {
         eprintln!("Warning: --ref-merged is ignored with -p/--partition");
     }
+
+    //resolve CRAM references before any output file is created,
+    // CRAM is only read/written for CRAM input, which needs --ref1/--ref2  
+    // merged CRAM output also needs --ref-merged (checked above). SAM/BAM need none.
+    let need_haplo_refs = input_is_cram;
+    let r1 = if need_haplo_refs {
+        Some(args.ref1.as_deref().ok_or(
+            "Input format is CRAM, but no reference FASTA for asm1 provided. Use --ref1 <FILE>")?)
+    } else {
+        None
+    };
+    let r2 = if need_haplo_refs {
+        Some(args.ref2.as_deref().ok_or(
+            "Input format is CRAM, but no reference FASTA for asm2 provided. Use --ref2 <FILE>")?)
+    } else {
+        None
+    };
 
     //make command line for the @PG tag space seperated
     let hiphap_cl: String = std::env::args()
@@ -238,25 +262,9 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    //resolve CRAM references: any CRAM reader or writer needs its reference FASTA. A CRAM input
-    //needs --ref1/--ref2 for the two readers; a partitioned CRAM output needs them for the two
-    //writers, while a merged CRAM output needs --ref-merged (checked above). SAM/BAM need none.
-    if input_is_cram || out_is_cram {
-        //the per-haplotype references are needed by the readers, and by the writers under -p
-        let need_haplo_refs = input_is_cram || (out_is_cram && args.partition);
-        let r1 = if need_haplo_refs {
-            Some(args.ref1.as_deref().ok_or(
-                "CRAM input or output, but no reference FASTA for asm1 provided. Use --ref1 <FILE>")?)
-        } else {
-            None
-        };
-        let r2 = if need_haplo_refs {
-            Some(args.ref2.as_deref().ok_or(
-                "CRAM input or output, but no reference FASTA for asm2 provided. Use --ref2 <FILE>")?)
-        } else {
-            None
-        };
-
+    //set CRAM references (resolved above, before any output file was created);
+    //CRAM output only happens for CRAM input, so input_is_cram covers both
+    if input_is_cram {
         //set reader references when the input is CRAM
         if input_is_cram {
             asm1_reader.set_reference(r1.unwrap())
@@ -281,8 +289,8 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     } else {
-        if args.ref1.is_some() { eprintln!("Warning: --ref1 is ignored (neither input nor output is CRAM)"); }
-        if args.ref2.is_some() { eprintln!("Warning: --ref2 is ignored (neither input nor output is CRAM)"); }
+        if args.ref1.is_some() { eprintln!("Warning: --ref1 is ignored for non-CRAM input"); }
+        if args.ref2.is_some() { eprintln!("Warning: --ref2 is ignored for non-CRAM input"); }
     }
 
     //autoestimate match score (-A in minimap2) from MS tag 
@@ -962,7 +970,8 @@ fn build_merged_header(asm1_hdr: &bam::HeaderView, asm2_hdr: &bam::HeaderView, c
     bam::Header::from_template(&view)
 }
 
-//write every record of a winning cluster to assigned file (merged or partitioned) 
+//write every record of a winning cluster to assigned file (merged or partitioned)
+#[allow(clippy::too_many_arguments)]
 fn write_winner_cluster(writer: &mut Writer, cluster: &mut [Record],hapq: Option<u8>,hp: Option<u8>,tid_offset: i32,span_writer: &mut Option<BufWriter<File>>,names: &[&[u8]],label: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut seen_tids: Vec<i32> = Vec::with_capacity(4);

@@ -75,8 +75,8 @@ pub struct Cli {
     #[arg(long, default_value_t = false, help = "don't penalize partially aligned reads in assignment")]
     pub no_cov_penalty: bool,
 
-    // output format; defaults to the input format
-    #[arg(short = 'O', long = "out-fmt", value_name = "FMT", value_enum, help = "output format: sam, bam, or cram [default: same as input]")]
+    // format of output files defaults to the input format
+    #[arg(short = 'O', long = "out-fmt", value_name = "FMT", value_enum, ignore_case = true, help = "output format [default: same as input; need CRAM input to write CRAM]")]
     pub out_fmt: Option<OutFormat>,
 
     // number of total threads to use;
@@ -97,11 +97,15 @@ pub enum UnmappedDest {
     Discard,
 }
 
-//output alignment format for a run; the alignment output follows the input format unless
-//--out-fmt overrides it (e.g. SAM input written as compressed BAM)
+//output alignment format.
+// same as  input format unless --out-fmt overrides 
+//CRAM is only written for CRAM input: the htslib writer receives its reference after the header
+//is written, which only works when the input header already carries M5 tags. cram stays parseable
+//so -O cram can be rejected with a clear message instead of a generic clap error
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum OutFormat {
     Sam,
     Bam,
+    #[value(hide = true)]
     Cram,
 }

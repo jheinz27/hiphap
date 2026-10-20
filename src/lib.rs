@@ -82,10 +82,13 @@ pub fn merge_intervals(intervals: &mut [(u32, u32)]) -> u32 {
 
 //strip a trailing alignment-file extension so -o can seed derived file names
 //(the span-chrom file), and so the extension can be compared against the output format
+//matched case-insensitively so OUT.BAM is recognised too
 pub fn strip_aln_ext(path: &str) -> &str {
     for e in [".sam", ".bam", ".cram", ".paf"] {
-        if let Some(stem) = path.strip_suffix(e) {
-            return stem;
+        //get() returns None rather than panicking if the cut is not on a char boundary
+        let cut = path.len().saturating_sub(e.len());
+        if path.len() >= e.len() && path.get(cut..).is_some_and(|t| t.eq_ignore_ascii_case(e)) {
+            return &path[..cut];
         }
     }
     path
@@ -112,17 +115,26 @@ pub fn output_paths(args: &Cli, ext: &str, span_ext: &str) -> (String, Option<St
             span,
         )
     } else {
-        //-o names the merged file outright
-        let merged = args
-            .output
-            .clone()
-            .unwrap_or_else(|| format!("hiphap_{}_{}_merged{}", args.s1, args.s2, ext));
+        //-o names the merged file outright, but a recognised alignment extension is swapped for the
+        //real output format's so BAM data never lands in a file named .sam
+        //(an extension that already matches, in any case, is kept as given)
+        let merged = match &args.output {
+            Some(o) => {
+                let stem = strip_aln_ext(o);
+                if stem.len() < o.len() && !o[stem.len()..].eq_ignore_ascii_case(ext) {
+                    format!("{}{}", stem, ext)
+                } else {
+                    o.clone()
+                }
+            }
+            None => format!("hiphap_{}_{}_merged{}", args.s1, args.s2, ext),
+        };
         (merged, None, span)
     }
 }
 
 //the output format follows the input format (or an explicit --out-fmt), so an -o extension that
-//disagrees is silently ignored; say so rather than leaving SAM text in a file named .bam
+//disagrees is replaced by the real one (see output_paths); say so rather than renaming silently
 //`overridden` is true when --out-fmt set the format, which changes where it came from
 pub fn warn_output_ext_mismatch(args: &Cli, ext: &str, overridden: bool) {
     let Some(o) = &args.output else { return };
@@ -136,8 +148,8 @@ pub fn warn_output_ext_mismatch(args: &Cli, ext: &str, overridden: bool) {
         let fmt = ext.trim_start_matches('.').to_uppercase();
         let source = if overridden { "set by --out-fmt" } else { "taken from the input" };
         eprintln!(
-            "Warning: output format is {} ({}); the '{}' extension of '{}' is ignored",
-            fmt, source, given, o
+            "Warning: output format is {} ({}); the '{}' extension of '{}' is replaced with '{}'",
+            fmt, source, given, o, ext
         );
     }
 }

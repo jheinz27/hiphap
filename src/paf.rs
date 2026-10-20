@@ -494,18 +494,23 @@ pub fn get_weighted_score(cur_clust : &Vec<String>, tag_prefix: &str, cov_penalt
             .parse::<u32>().map_err(|e| format!("Invalid qend in PAF: {}", e))?;
 
         let mut is_secondary = false;
-        let mut as_score = 0;
+        let mut as_score: Option<i32> = None;
         //find score and tp tags (start from field 12)
         for field in fields.skip(8) { // skip to tags
             if field.starts_with("tp:A:S") { is_secondary = true; } // check for secondary alignment tag
             if let Some(val) = field.strip_prefix(tag_prefix) {
-                 as_score = val.parse()
-                    .map_err(|e| format!("Invalid {} value in PAF: {}", tag_prefix, e))?;
+                 as_score = Some(val.parse()
+                    .map_err(|e| format!("Invalid {} value in PAF: {}", tag_prefix, e))?);
             }
         }
 
         //do not factor secondary alignments into choosing best alignment
         if is_secondary { continue; }
+
+        //a missing score tag would otherwise score 0 and silently turn every read into a tie
+        //(e.g. minimap2 run without -c); error out like the SAM path does
+        let as_score = as_score.ok_or_else(|| format!("Read '{}' is missing the '{}' tag",
+            alignment.split('\t').next().unwrap_or("unknown"), tag_prefix.trim_end_matches(':')))?;
 
         n_splits += 1;
 
