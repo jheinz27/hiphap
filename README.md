@@ -67,28 +67,28 @@ Arguments:
   <ASM2>  asm2 alignment file (sam/bam/cram/paf)
 
 Options:
-Options:
-  -1, --s1 <NAME>           label for asm1 sample (used in output names) [default: asm1]
-  -2, --s2 <NAME>           label for asm2 sample (used in output names) [default: asm2]
-      --paf                 input files are PAF
-      --ms                  use ms:i: tag rather than AS:i: for alignment score
-  -p, --partition           write one file per haplotype instead of a single merged output file
-  -b, --both                write reads with equal alignment scores to both output files (requires -p)
-  -k, --keep-loser          also write each read's best alignment to the losing haplotype as a secondary record, tagged hs:A: (merged output only)
-      --loser-frac <FLOAT>  score floor for AS score fraction in --keep-loser [default: 0.8]
-  -o, --output <FILE>       output file name [default: hiphap_{s1}_{s2}_merged.*]
-  -u, --unmapped <DEST>     where to write reads unmapped in both assemblies: asm1, asm2, or discard [default: asm1] [possible values: asm1, asm2, discard]
-      --ref-merged <FILE>   combined reference FASTA for merged CRAM output; required for merged CRAM output
-      --ref1 <FILE>         reference FASTA for cram file (asm1)
-      --ref2 <FILE>         reference FASTA for cram file (asm2)
-  -A, --match-sc <FLOAT>    per-base match score from aligner scoring scheme (auto-estimated if omitted)
-      --no-hapq             skip HAPQ score calculation and hq tag output (e.g. for comparing GRCh38 vs CHM13)
-      --no-span-chrom       disable writing the chromosome-spanning reads file (*_span_chrom.fastq, or .txt for PAF)
-      --no-cov-penalty      don't penalize partially aligned reads in assignment
-  -O, --out-fmt <FMT>       output format [default: same as input; need CRAM input to write CRAM] [possible values: sam, bam]
-  -t, --threads <INT>       number of threads[default: 6; 8 with -p]
-  -h, --help                Print help
-  -V, --version             Print version
+  -1, --s1 <NAME>              label for asm1 sample (used in output names) [default: asm1]
+  -2, --s2 <NAME>              label for asm2 sample (used in output names) [default: asm2]
+      --paf                    input files are PAF
+      --ms                     use ms:i: tag rather than AS:i: for alignment score
+  -p, --partition              write one file per haplotype instead of a single merged output file
+  -b, --both                   write reads with equal alignment scores to both output files (requires -p)
+  -k, --keep-loser             also write each read's best alignment to the losing haplotype as a secondary record, tagged hs:A: (merged output only)
+      --loser-frac <FLOAT>     score floor for AS score fraction in --keep-loser [default: 0.8]
+  -o, --output <FILE>          output file name [default: hiphap_{s1}_{s2}_merged.*]
+  -u, --unmapped <DEST>        where to write reads unmapped in both assemblies: asm1, asm2, or discard [default: asm1] [possible values: asm1, asm2, discard]
+      --ref-merged <FILE>      combined reference FASTA for merged CRAM output; required for merged CRAM output
+      --ref1 <FILE>            reference FASTA for cram file (asm1)
+      --ref2 <FILE>            reference FASTA for cram file (asm2)
+  -A, --match-sc <FLOAT>       per-base match score from aligner scoring scheme (auto-estimated if omitted)
+      --no-hapq                skip HAPQ score calculation and hq tag output (e.g. for comparing GRCh38 vs CHM13)
+      --no-span-chrom          disable writing the chromosome-spanning reads file (*_span_chrom.fastq, or .txt for PAF)
+      --no-cov-penalty         don't penalize partially aligned reads in assignment
+  -S, --split-penalty <FLOAT>  penalty subtracted from the alignment score per supplementary alignment (0 to disable) [default: 25]
+  -O, --out-fmt <FMT>          output format [default: same as input; need CRAM input to write CRAM] [possible values: sam, bam]
+  -t, --threads <INT>          number of threads[default: 6; 8 with -p]
+  -h, --help                   Print help
+  -V, --version                Print version
 ```
 
 Each output record is annotated with two tags: 

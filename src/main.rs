@@ -18,6 +18,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>>  {
         return Err(format!("--loser-frac must be in [0, 1] (got {})", args.loser_frac).into());
     }
 
+    //--split-penalty is subtracted per supplementary segment; a negative value would reward splitting
+    //infinity is rejected too since inf * 0 = NaN for single-segment reads
+    if args.split_penalty < 0.0 || !args.split_penalty.is_finite() {
+        return Err(format!("--split-penalty must be a finite number >= 0 (got {})", args.split_penalty).into());
+    }
+
     if args.paf {
         if args.threads.is_some() {
             eprintln!("Warning: --threads is ignored in PAF mode");

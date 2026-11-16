@@ -75,6 +75,11 @@ pub struct Cli {
     #[arg(long, default_value_t = false, help = "don't penalize partially aligned reads in assignment")]
     pub no_cov_penalty: bool,
 
+    // per-split "gap open" penalty subtracted from the weighted score for each supplementary segment
+    // default 25 sits between minimap2's long-gap open for ONT (24) and HiFi (26)
+    #[arg(short = 'S', long, value_name = "FLOAT", default_value_t = 25.0, help = "penalty subtracted from the alignment score per supplementary alignment (0 to disable)")]
+    pub split_penalty: f32,
+
     // format of output files defaults to the input format
     #[arg(short = 'O', long = "out-fmt", value_name = "FMT", value_enum, ignore_case = true, help = "output format [default: same as input; need CRAM input to write CRAM]")]
     pub out_fmt: Option<OutFormat>,

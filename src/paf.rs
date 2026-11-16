@@ -466,8 +466,8 @@ fn cluster_qlen(cluster: &[String]) -> u64 {
 }
 
 //helper function to get weighted score of split reads using a specified tag (AS or ms)
-//weighted_score = (SUM(score) / SUM(Alignment_len)) * tot read_bps_aligned
-pub fn get_weighted_score(cur_clust : &Vec<String>, tag_prefix: &str, cov_penalty: bool) -> Result<(f32, u32), Box<dyn std::error::Error>> {
+//weighted_score = (SUM(score) / SUM(Alignment_len)) * tot read_bps_aligned * cov_fraction - split_penalty * (n_splits - 1)
+pub fn get_weighted_score(cur_clust : &Vec<String>, tag_prefix: &str, cov_penalty: bool, split_penalty: f32) ->Result<(f32, u32), Box<dyn std::error::Error>> {
     let mut sum_alignment_lens = 0;
     let mut sum_alignment_scores = 0;
     let mut n_splits: u32 = 0;
@@ -538,9 +538,13 @@ pub fn get_weighted_score(cur_clust : &Vec<String>, tag_prefix: &str, cov_penalt
     let read_bps_aligned = crate::merge_intervals(&mut read_intervals);
 
     //weighted_score = (SUM(Alignment_Score) / SUM(Alignment_len)) * tot read_bps_aligned * cov_fraction
+    //                  - split_penalty * (n_splits - 1)
     //cov_fraction is fixed at 1 with --no-cov-penalty
+    //each supplementary segment (non-secondary segments beyond the first) is penalized like a gap open
     let cov_fraction = if cov_penalty { read_bps_aligned as f32 / read_len as f32 } else { 1.0 };
-    Ok(((sum_alignment_scores as f32 / sum_alignment_lens as f32) * read_bps_aligned as f32 * cov_fraction, n_splits))
+    let weighted = (sum_alignment_scores as f32 / sum_alignment_lens as f32) * read_bps_aligned as f32 * cov_fraction
+        - split_penalty * n_splits.saturating_sub(1) as f32;
+    Ok((weighted, n_splits))
 
 }
 
@@ -559,8 +563,8 @@ pub fn compare_clusters<'a>(clust1:&'a Vec<String>, clust2:&'a Vec<String>, args
 
     let tag_prefix = if args.ms { "ms:i:" } else { "AS:i:" };
     //get score and number of non-secondary alignment segments for each cluster
-    let (score1, n_splits1) = get_weighted_score(clust1, tag_prefix, !args.no_cov_penalty)?;
-    let (score2, n_splits2) = get_weighted_score(clust2, tag_prefix, !args.no_cov_penalty)?;
+    let (score1, n_splits1) = get_weighted_score(clust1, tag_prefix, !args.no_cov_penalty, args.split_penalty)?;
+    let (score2, n_splits2) = get_weighted_score(clust2, tag_prefix, !args.no_cov_penalty, args.split_penalty)?;
 
     //return respective winner depending on which AS is higher,
     //both is a special case that can be determined by user input
